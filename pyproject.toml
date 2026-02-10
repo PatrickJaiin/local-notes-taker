@@ -1,0 +1,27 @@
+[project]
+name = "local-notes"
+version = "0.1.0"
+description = "macOS menu bar app that records, transcribes, and summarizes audio locally using Whisper and Ollama"
+requires-python = ">=3.9"
+dependencies = [
+    "rumps>=0.4.0",
+    "pynput>=1.7.6",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "faster-whisper>=1.0.0",
+    "ollama>=0.2.0",
+    "pyperclip>=1.8.2",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+local-notes = "app.main:main"
+
+[project.urls]
+Homepage = "https://github.com/PatrickJaiin/local-notes-taker"
+Issues = "https://github.com/PatrickJaiin/local-notes-taker/issues"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,9 @@
+rumps>=0.4.0
+pynput>=1.7.6
+sounddevice>=0.4.6
+numpy>=1.24.0
+scipy>=1.10.0
+faster-whisper>=1.0.0
+ollama>=0.2.0
+pyperclip>=1.8.2
+pyyaml>=6.0
