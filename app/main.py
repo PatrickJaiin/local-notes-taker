@@ -6,7 +6,7 @@ from pathlib import Path
 
 import rumps
 import yaml
-from AppKit import NSApp, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular
+from AppKit import NSApp, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular, NSWorkspace
 from pynput import keyboard
 
 from app.output import auto_paste, copy_to_clipboard, show_notification
@@ -20,6 +20,18 @@ TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "transcripts"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 USE_CASES = ["Meeting", "Lecture", "Brainstorm", "Interview", "Stand-up"]
+
+LANGUAGES = [
+    ("Auto-detect", None),
+    ("English", "en"),
+    ("Hindi", "hi"),
+    ("Malayalam", "ml"),
+    ("French", "fr"),
+    ("Spanish", "es"),
+    ("German", "de"),
+    ("Japanese", "ja"),
+    ("Chinese", "zh"),
+]
 
 
 class State(Enum):
@@ -40,6 +52,7 @@ class LocalNotesApp(rumps.App):
         self.state = State.IDLE
         self.recorder = Recorder()
         self._use_case = USE_CASES[0]
+        self._language = self.config.get("language")
         self._current_step = ""
         self._processing_done = False
         self._spinner_index = 0
@@ -55,10 +68,21 @@ class LocalNotesApp(rumps.App):
         use_case_menu.add(rumps.separator)
         use_case_menu.add(rumps.MenuItem("Custom...", callback=self._custom_use_case))
 
+        # Build language submenu with checkmarks
+        lang_menu = rumps.MenuItem("Language")
+        for label, code in LANGUAGES:
+            item = rumps.MenuItem(label, callback=self._select_language)
+            if code == self._language:
+                item.state = 1
+            lang_menu.add(item)
+        lang_menu.add(rumps.separator)
+        lang_menu.add(rumps.MenuItem("Other...", callback=self._custom_language))
+
         self.menu = [
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             None,
             use_case_menu,
+            lang_menu,
             None,
         ]
         self._start_hotkey_listener()
@@ -69,9 +93,13 @@ class LocalNotesApp(rumps.App):
 
     def _start_hotkey_listener(self):
         hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+n")
-        hotkeys = keyboard.GlobalHotKeys({hotkey_str: self._on_hotkey})
-        hotkeys.daemon = True
-        hotkeys.start()
+        hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), self._on_hotkey)
+        listener = keyboard.Listener(
+            on_press=lambda k: hotkey.press(listener.canonical(k)),
+            on_release=lambda k: hotkey.release(listener.canonical(k)),
+        )
+        listener.daemon = True
+        listener.start()
 
     def _select_use_case(self, sender):
         self._uncheck_all_use_cases()
@@ -79,6 +107,8 @@ class LocalNotesApp(rumps.App):
         self._use_case = sender.title
 
     def _custom_use_case(self, sender):
+        prev_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
         NSApp.activateIgnoringOtherApps_(True)
 
@@ -92,6 +122,8 @@ class LocalNotesApp(rumps.App):
         response = window.run()
 
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        if prev_app:
+            prev_app.activateWithOptions_(1 << 1)
 
         if not response.clicked or not response.text.strip():
             return
@@ -105,6 +137,59 @@ class LocalNotesApp(rumps.App):
         if custom_text not in submenu:
             submenu.add(rumps.MenuItem(custom_text, callback=self._select_use_case))
         submenu[custom_text].state = 1
+
+    def _select_language(self, sender):
+        self._uncheck_all_languages()
+        sender.state = 1
+        # Look up the code for this label
+        code = None
+        for label, c in LANGUAGES:
+            if label == sender.title:
+                code = c
+                break
+        self._language = code
+
+    def _custom_language(self, sender):
+        prev_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        NSApp.activateIgnoringOtherApps_(True)
+
+        window = rumps.Window(
+            message="Enter a language code (e.g. hi, ml, fr, ta, ko):",
+            title="Local Notes",
+            default_text="",
+            ok="Set",
+            cancel="Cancel",
+        )
+        response = window.run()
+
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        if prev_app:
+            prev_app.activateWithOptions_(1 << 1)
+
+        if not response.clicked or not response.text.strip():
+            return
+
+        code = response.text.strip().lower()
+        self._uncheck_all_languages()
+        self._language = code
+
+        # Add to menu if it's new, and check it
+        submenu = self.menu["Language"]
+        if code not in submenu:
+            submenu.add(rumps.MenuItem(code, callback=self._select_custom_language))
+        submenu[code].state = 1
+
+    def _select_custom_language(self, sender):
+        self._uncheck_all_languages()
+        sender.state = 1
+        self._language = sender.title
+
+    def _uncheck_all_languages(self):
+        for item in self.menu["Language"].values():
+            if isinstance(item, rumps.MenuItem):
+                item.state = 0
 
     def _uncheck_all_use_cases(self):
         for item in self.menu["Use Case"].values():
@@ -177,7 +262,7 @@ class LocalNotesApp(rumps.App):
 
             self._current_step = "Transcribing"
             whisper_model = self.config.get("whisper_model", "base")
-            transcript = transcribe(audio_path, model_size=whisper_model)
+            transcript = transcribe(audio_path, model_size=whisper_model, language=self._language)
 
             if not transcript.strip():
                 show_notification("Local Notes", "No speech detected.")

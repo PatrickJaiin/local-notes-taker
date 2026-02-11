@@ -12,7 +12,7 @@ def _get_model(model_size: str) -> WhisperModel:
     return _model_cache[model_size]
 
 
-def transcribe(audio_path: str, model_size: str = "base") -> str:
+def transcribe(audio_path: str, model_size: str = "base", language: str | None = None) -> str:
     model = _get_model(model_size)
-    segments, _ = model.transcribe(audio_path, beam_size=5)
+    segments, _ = model.transcribe(audio_path, beam_size=5, language=language)
     return " ".join(segment.text.strip() for segment in segments)
