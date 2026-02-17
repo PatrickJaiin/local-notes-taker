@@ -57,6 +57,9 @@ class LocalNotesApp(rumps.App):
         self._processing_done = False
         self._spinner_index = 0
         self._pending_action = None
+        self._transcript_so_far = ""
+        self._flush_stop = threading.Event()
+        self._incremental_temps: list[str] = []
 
         # Build use-case submenu with checkmarks
         use_case_menu = rumps.MenuItem("Use Case")
@@ -78,8 +81,13 @@ class LocalNotesApp(rumps.App):
         lang_menu.add(rumps.separator)
         lang_menu.add(rumps.MenuItem("Other...", callback=self._custom_language))
 
+        self._transcript_preview = rumps.MenuItem(
+            "Transcript Preview", callback=self._copy_transcript,
+        )
+
         self.menu = [
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
+            self._transcript_preview,
             None,
             use_case_menu,
             lang_menu,
@@ -199,13 +207,38 @@ class LocalNotesApp(rumps.App):
     def _on_hotkey(self):
         self._pending_action = lambda: self.toggle_recording(None)
 
+    def _copy_transcript(self, sender):
+        if self._transcript_so_far:
+            copy_to_clipboard(self._transcript_so_far)
+            show_notification("Local Notes", "Transcript copied to clipboard!")
+
+    def _incremental_transcribe_loop(self):
+        whisper_model = self.config.get("whisper_model", "base")
+        while not self._flush_stop.wait(10):
+            path = self.recorder.flush()
+            if path is None:
+                continue
+            try:
+                chunk_text = transcribe(path, model_size=whisper_model, language=self._language)
+                if chunk_text.strip():
+                    self._transcript_so_far += (" " + chunk_text if self._transcript_so_far else chunk_text)
+            finally:
+                self._incremental_temps.append(path)
+
     def _tick(self, _):
         """Runs on main thread: dispatches hotkey actions, animates spinner,
-        and detects processing completion."""
+        updates live preview, and detects processing completion."""
         action = self._pending_action
         if action is not None:
             self._pending_action = None
             action()
+
+        if self.state == State.RECORDING:
+            word_count = len(self._transcript_so_far.split()) if self._transcript_so_far else 0
+            self.title = f"🔴 ({word_count} words)" if word_count else "🔴"
+            preview = self._transcript_so_far[-200:] if self._transcript_so_far else "(listening...)"
+            self._transcript_preview.title = f"Preview: {preview}"
+            return
 
         if self.state != State.PROCESSING:
             return
@@ -229,7 +262,11 @@ class LocalNotesApp(rumps.App):
         self.state = State.RECORDING
         self.title = "🔴"
         self.menu["Start Recording"].title = "Stop Recording"
+        self._transcript_so_far = ""
+        self._flush_stop.clear()
+        self._incremental_temps = []
         self.recorder.start()
+        threading.Thread(target=self._incremental_transcribe_loop, daemon=True).start()
 
     def _stop_recording(self):
         self.state = State.PROCESSING
@@ -257,14 +294,21 @@ class LocalNotesApp(rumps.App):
     def _process(self):
         audio_path = None
         try:
+            # Stop the incremental loop and flush the tail
+            self._flush_stop.set()
+
             self._current_step = "Saving audio"
             audio_path = self.recorder.stop()
 
-            self._current_step = "Transcribing"
+            # Transcribe only the remaining tail audio
+            self._current_step = "Transcribing tail"
             whisper_model = self.config.get("whisper_model", "base")
-            transcript = transcribe(audio_path, model_size=whisper_model, language=self._language)
+            tail_text = transcribe(audio_path, model_size=whisper_model, language=self._language)
+            if tail_text.strip():
+                self._transcript_so_far += (" " + tail_text if self._transcript_so_far else tail_text)
 
-            if not transcript.strip():
+            transcript = self._transcript_so_far.strip()
+            if not transcript:
                 show_notification("Local Notes", "No speech detected.")
                 return
 
@@ -284,6 +328,11 @@ class LocalNotesApp(rumps.App):
             show_notification("Local Notes - Error", str(e))
         finally:
             self._processing_done = True
+            for tmp in self._incremental_temps:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
             if audio_path:
                 try:
                     os.unlink(audio_path)
@@ -294,6 +343,7 @@ class LocalNotesApp(rumps.App):
         self.state = State.IDLE
         self.title = "📝"
         self.menu["Start Recording"].title = "Start Recording"
+        self._transcript_preview.title = "Transcript Preview"
 
 
 def main():

@@ -29,6 +29,21 @@ class Recorder:
             )
             self._stream.start()
 
+    def flush(self) -> str | None:
+        """Drain accumulated chunks to a temp WAV without stopping the stream."""
+        with self._lock:
+            if not self._chunks:
+                return None
+
+            audio = np.concatenate(self._chunks, axis=0)
+            self._chunks = []
+
+        audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
+        tmp.close()
+        return tmp.name
+
     def stop(self) -> str:
         """Stop recording and return the path to the WAV file."""
         with self._lock:
