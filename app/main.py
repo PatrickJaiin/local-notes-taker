@@ -1,12 +1,14 @@
 import os
 import threading
+import tkinter as tk
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
+from tkinter import simpledialog
 
-import rumps
+import pystray
 import yaml
-from AppKit import NSApp, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular, NSWorkspace
+from PIL import Image, ImageDraw
 from pynput import keyboard
 
 from app.output import auto_paste, copy_to_clipboard, show_notification
@@ -16,8 +18,6 @@ from app.transcriber import transcribe
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "transcripts"
-
-SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 USE_CASES = ["Meeting", "Lecture", "Brainstorm", "Interview", "Stand-up"]
 
@@ -33,6 +33,8 @@ LANGUAGES = [
     ("Chinese", "zh"),
 ]
 
+ICON_SIZE = 64
+
 
 class State(Enum):
     IDLE = auto()
@@ -40,14 +42,26 @@ class State(Enum):
     PROCESSING = auto()
 
 
+def _make_icon(color: str) -> Image.Image:
+    """Generate a colored circle icon for the system tray."""
+    img = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([4, 4, ICON_SIZE - 4, ICON_SIZE - 4], fill=color)
+    return img
+
+
+ICON_IDLE = _make_icon("#4A90D9")      # blue
+ICON_RECORDING = _make_icon("#D94A4A")  # red
+ICON_PROCESSING = _make_icon("#D9A04A") # orange
+
+
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
 
-class LocalNotesApp(rumps.App):
+class LocalNotesApp:
     def __init__(self):
-        super().__init__("Local Notes", title="📝")
         self.config = load_config()
         self.state = State.IDLE
         self.recorder = Recorder()
@@ -55,44 +69,163 @@ class LocalNotesApp(rumps.App):
         self._language = self.config.get("language")
         self._current_step = ""
         self._processing_done = False
-        self._spinner_index = 0
         self._pending_action = None
+        self._custom_use_cases: list[str] = []
+        self._custom_languages: list[tuple[str, str]] = []
+        self._stop_event = threading.Event()
+        self._transcript_so_far = ""
+        self._flush_stop = threading.Event()
+        self._incremental_temps: list[str] = []
 
-        # Build use-case submenu with checkmarks
-        use_case_menu = rumps.MenuItem("Use Case")
-        for uc in USE_CASES:
-            item = rumps.MenuItem(uc, callback=self._select_use_case)
-            if uc == self._use_case:
-                item.state = 1
-            use_case_menu.add(item)
-        use_case_menu.add(rumps.separator)
-        use_case_menu.add(rumps.MenuItem("Custom...", callback=self._custom_use_case))
+        self._icon = pystray.Icon(
+            "local-notes",
+            icon=ICON_IDLE,
+            title="Local Notes — Idle",
+            menu=pystray.Menu(self._build_menu),
+        )
 
-        # Build language submenu with checkmarks
-        lang_menu = rumps.MenuItem("Language")
-        for label, code in LANGUAGES:
-            item = rumps.MenuItem(label, callback=self._select_language)
-            if code == self._language:
-                item.state = 1
-            lang_menu.add(item)
-        lang_menu.add(rumps.separator)
-        lang_menu.add(rumps.MenuItem("Other...", callback=self._custom_language))
-
-        self.menu = [
-            rumps.MenuItem("Start Recording", callback=self.toggle_recording),
-            None,
-            use_case_menu,
-            lang_menu,
-            None,
-        ]
         self._start_hotkey_listener()
-        # Single poll timer created on main thread — guarantees all UI
-        # updates happen on the main thread, avoiding AppKit crashes.
-        self._poll_timer = rumps.Timer(self._tick, 0.15)
-        self._poll_timer.start()
+
+    def _build_menu(self) -> list:
+        """Dynamically build the tray menu (called each time the menu opens)."""
+        # Toggle recording item
+        if self.state == State.IDLE:
+            rec_label = "Start Recording"
+        elif self.state == State.RECORDING:
+            rec_label = "Stop Recording"
+        else:
+            rec_label = f"{self._current_step}..."
+
+        # Transcript preview (visible during/after recording)
+        if self._transcript_so_far:
+            preview_text = self._transcript_so_far[-200:]
+            preview_label = f"Preview: {preview_text}"
+        elif self.state == State.RECORDING:
+            preview_label = "Preview: (listening...)"
+        else:
+            preview_label = "Transcript Preview"
+
+        items = [
+            pystray.MenuItem(rec_label, self._on_toggle_recording),
+            pystray.MenuItem(preview_label, self._on_copy_transcript),
+            pystray.Menu.SEPARATOR,
+        ]
+
+        # Use Case submenu
+        uc_items = []
+        all_use_cases = USE_CASES + self._custom_use_cases
+        for uc in all_use_cases:
+            uc_items.append(pystray.MenuItem(
+                uc,
+                self._make_use_case_callback(uc),
+                checked=lambda item, u=uc: self._use_case == u,
+            ))
+        uc_items.append(pystray.Menu.SEPARATOR)
+        uc_items.append(pystray.MenuItem("Custom...", self._on_custom_use_case))
+        items.append(pystray.MenuItem("Use Case", pystray.Menu(*uc_items)))
+
+        # Language submenu
+        lang_items = []
+        all_languages = list(LANGUAGES) + self._custom_languages
+        for label, code in all_languages:
+            lang_items.append(pystray.MenuItem(
+                label,
+                self._make_language_callback(code),
+                checked=lambda item, c=code: self._language == c,
+            ))
+        lang_items.append(pystray.Menu.SEPARATOR)
+        lang_items.append(pystray.MenuItem("Other...", self._on_custom_language))
+        items.append(pystray.MenuItem("Language", pystray.Menu(*lang_items)))
+
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("Quit", self._on_quit))
+
+        return items
+
+    def _make_use_case_callback(self, uc: str):
+        def callback(icon, item):
+            self._use_case = uc
+        return callback
+
+    def _make_language_callback(self, code):
+        def callback(icon, item):
+            self._language = code
+        return callback
+
+    def _on_copy_transcript(self, icon, item):
+        if self._transcript_so_far:
+            copy_to_clipboard(self._transcript_so_far)
+            show_notification("Local Notes", "Transcript copied to clipboard!")
+
+    def _incremental_transcribe_loop(self):
+        whisper_model = self.config.get("whisper_model", "base")
+        while not self._flush_stop.wait(10):
+            path = self.recorder.flush()
+            if path is None:
+                continue
+            try:
+                chunk_text = transcribe(path, model_size=whisper_model, language=self._language)
+                if chunk_text.strip():
+                    self._transcript_so_far += (" " + chunk_text if self._transcript_so_far else chunk_text)
+                    # Update tooltip with word count
+                    word_count = len(self._transcript_so_far.split())
+                    self._icon.title = f"Local Notes — Recording ({word_count} words)"
+            finally:
+                self._incremental_temps.append(path)
+
+    def _on_toggle_recording(self, icon, item):
+        if self.state == State.IDLE:
+            self._start_recording()
+        elif self.state == State.RECORDING:
+            self._stop_recording()
+
+    def _on_custom_use_case(self, icon, item):
+        thread = threading.Thread(target=self._show_custom_use_case_dialog, daemon=True)
+        thread.start()
+
+    def _show_custom_use_case_dialog(self):
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        result = simpledialog.askstring(
+            "Local Notes",
+            "Enter a custom use case:",
+            parent=root,
+        )
+        root.destroy()
+        if result and result.strip():
+            custom_text = result.strip()
+            self._use_case = custom_text
+            if custom_text not in USE_CASES and custom_text not in self._custom_use_cases:
+                self._custom_use_cases.append(custom_text)
+
+    def _on_custom_language(self, icon, item):
+        thread = threading.Thread(target=self._show_custom_language_dialog, daemon=True)
+        thread.start()
+
+    def _show_custom_language_dialog(self):
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        result = simpledialog.askstring(
+            "Local Notes",
+            "Enter a language code (e.g. hi, ml, fr, ta, ko):",
+            parent=root,
+        )
+        root.destroy()
+        if result and result.strip():
+            code = result.strip().lower()
+            self._language = code
+            existing_codes = [c for _, c in LANGUAGES] + [c for _, c in self._custom_languages]
+            if code not in existing_codes:
+                self._custom_languages.append((code, code))
+
+    def _on_quit(self, icon, item):
+        self._stop_event.set()
+        icon.stop()
 
     def _start_hotkey_listener(self):
-        hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+n")
+        hotkey_str = self.config.get("hotkey", "<ctrl>+<shift>+i")
         hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), self._on_hotkey)
         listener = keyboard.Listener(
             on_press=lambda k: hotkey.press(listener.canonical(k)),
@@ -101,125 +234,10 @@ class LocalNotesApp(rumps.App):
         listener.daemon = True
         listener.start()
 
-    def _select_use_case(self, sender):
-        self._uncheck_all_use_cases()
-        sender.state = 1
-        self._use_case = sender.title
-
-    def _custom_use_case(self, sender):
-        prev_app = NSWorkspace.sharedWorkspace().frontmostApplication()
-
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
-        NSApp.activateIgnoringOtherApps_(True)
-
-        window = rumps.Window(
-            message="Enter a custom use case:",
-            title="Local Notes",
-            default_text="",
-            ok="Set",
-            cancel="Cancel",
-        )
-        response = window.run()
-
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        if prev_app:
-            prev_app.activateWithOptions_(1 << 1)
-
-        if not response.clicked or not response.text.strip():
-            return
-
-        custom_text = response.text.strip()
-        self._uncheck_all_use_cases()
-        self._use_case = custom_text
-
-        # Add to menu if it's new, and check it
-        submenu = self.menu["Use Case"]
-        if custom_text not in submenu:
-            submenu.add(rumps.MenuItem(custom_text, callback=self._select_use_case))
-        submenu[custom_text].state = 1
-
-    def _select_language(self, sender):
-        self._uncheck_all_languages()
-        sender.state = 1
-        # Look up the code for this label
-        code = None
-        for label, c in LANGUAGES:
-            if label == sender.title:
-                code = c
-                break
-        self._language = code
-
-    def _custom_language(self, sender):
-        prev_app = NSWorkspace.sharedWorkspace().frontmostApplication()
-
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
-        NSApp.activateIgnoringOtherApps_(True)
-
-        window = rumps.Window(
-            message="Enter a language code (e.g. hi, ml, fr, ta, ko):",
-            title="Local Notes",
-            default_text="",
-            ok="Set",
-            cancel="Cancel",
-        )
-        response = window.run()
-
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        if prev_app:
-            prev_app.activateWithOptions_(1 << 1)
-
-        if not response.clicked or not response.text.strip():
-            return
-
-        code = response.text.strip().lower()
-        self._uncheck_all_languages()
-        self._language = code
-
-        # Add to menu if it's new, and check it
-        submenu = self.menu["Language"]
-        if code not in submenu:
-            submenu.add(rumps.MenuItem(code, callback=self._select_custom_language))
-        submenu[code].state = 1
-
-    def _select_custom_language(self, sender):
-        self._uncheck_all_languages()
-        sender.state = 1
-        self._language = sender.title
-
-    def _uncheck_all_languages(self):
-        for item in self.menu["Language"].values():
-            if isinstance(item, rumps.MenuItem):
-                item.state = 0
-
-    def _uncheck_all_use_cases(self):
-        for item in self.menu["Use Case"].values():
-            if isinstance(item, rumps.MenuItem):
-                item.state = 0
-
     def _on_hotkey(self):
-        self._pending_action = lambda: self.toggle_recording(None)
+        self._pending_action = self._toggle_from_hotkey
 
-    def _tick(self, _):
-        """Runs on main thread: dispatches hotkey actions, animates spinner,
-        and detects processing completion."""
-        action = self._pending_action
-        if action is not None:
-            self._pending_action = None
-            action()
-
-        if self.state != State.PROCESSING:
-            return
-
-        if self._processing_done:
-            self._reset()
-            return
-
-        frame = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
-        self.title = f"{frame} {self._current_step}"
-        self.menu["Start Recording"].title = f"{self._current_step}..."
-        self._spinner_index += 1
-
-    def toggle_recording(self, sender):
+    def _toggle_from_hotkey(self):
         if self.state == State.IDLE:
             self._start_recording()
         elif self.state == State.RECORDING:
@@ -227,15 +245,20 @@ class LocalNotesApp(rumps.App):
 
     def _start_recording(self):
         self.state = State.RECORDING
-        self.title = "🔴"
-        self.menu["Start Recording"].title = "Stop Recording"
+        self._icon.icon = ICON_RECORDING
+        self._icon.title = "Local Notes — Recording"
+        self._transcript_so_far = ""
+        self._flush_stop.clear()
+        self._incremental_temps = []
         self.recorder.start()
+        threading.Thread(target=self._incremental_transcribe_loop, daemon=True).start()
 
     def _stop_recording(self):
         self.state = State.PROCESSING
         self._current_step = "Processing"
         self._processing_done = False
-        self._spinner_index = 0
+        self._icon.icon = ICON_PROCESSING
+        self._icon.title = "Local Notes — Processing"
 
         thread = threading.Thread(target=self._process, daemon=True)
         thread.start()
@@ -257,25 +280,37 @@ class LocalNotesApp(rumps.App):
     def _process(self):
         audio_path = None
         try:
+            # Stop the incremental loop and flush the tail
+            self._flush_stop.set()
+
             self._current_step = "Saving audio"
+            self._icon.title = "Local Notes — Saving audio"
             audio_path = self.recorder.stop()
 
-            self._current_step = "Transcribing"
+            # Transcribe only the remaining tail audio
+            self._current_step = "Transcribing tail"
+            self._icon.title = "Local Notes — Transcribing tail"
             whisper_model = self.config.get("whisper_model", "base")
-            transcript = transcribe(audio_path, model_size=whisper_model, language=self._language)
+            tail_text = transcribe(audio_path, model_size=whisper_model, language=self._language)
+            if tail_text.strip():
+                self._transcript_so_far += (" " + tail_text if self._transcript_so_far else tail_text)
 
-            if not transcript.strip():
+            transcript = self._transcript_so_far.strip()
+            if not transcript:
                 show_notification("Local Notes", "No speech detected.")
                 return
 
             self._current_step = "Summarizing"
+            self._icon.title = "Local Notes — Summarizing"
             ollama_model = self.config.get("ollama_model", "qwen3:8b")
             summary = summarize(transcript, model=ollama_model, use_case=self._use_case)
 
             self._current_step = "Saving"
+            self._icon.title = "Local Notes — Saving"
             self._save_transcript(transcript, summary)
 
             self._current_step = "Copying"
+            self._icon.title = "Local Notes — Copying"
             copy_to_clipboard(summary)
             show_notification("Local Notes", "Summary copied to clipboard!")
             auto_paste()
@@ -284,16 +319,36 @@ class LocalNotesApp(rumps.App):
             show_notification("Local Notes - Error", str(e))
         finally:
             self._processing_done = True
+            for tmp in self._incremental_temps:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
             if audio_path:
                 try:
                     os.unlink(audio_path)
                 except Exception:
                     pass
+            self._reset()
 
     def _reset(self):
         self.state = State.IDLE
-        self.title = "📝"
-        self.menu["Start Recording"].title = "Start Recording"
+        self._icon.icon = ICON_IDLE
+        self._icon.title = "Local Notes — Idle"
+
+    def _poll_loop(self):
+        """Background thread that dispatches hotkey actions."""
+        while not self._stop_event.is_set():
+            action = self._pending_action
+            if action is not None:
+                self._pending_action = None
+                action()
+            self._stop_event.wait(0.15)
+
+    def run(self):
+        poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        poll_thread.start()
+        self._icon.run()
 
 
 def main():

@@ -1,4 +1,4 @@
-hotkey: <cmd>+<shift>+i
+hotkey: <ctrl>+<shift>+i
 whisper_model: base        # tiny, base, small, medium, large-v3
 ollama_model: qwen3:8b     # any model pulled in ollama
 language:                   # auto-detect if empty, or set: en, hi, ml, fr, etc.
