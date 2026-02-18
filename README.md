@@ -4,7 +4,7 @@ A macOS menu bar app that records audio, transcribes it with Whisper, and genera
 
 ## Download
 
-Grab the latest standalone `.dmg` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and the Qwen3 model — no manual installation needed, just open and go.
+Grab the latest standalone `.dmg` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and automatically downloads the Qwen3 model on first launch — no manual installation needed.
 
 > A Windows build (`.zip`) is also available on the Releases page, built from the [`windows`](https://github.com/PatrickJaiin/local-notes-taker/tree/windows) branch.
 

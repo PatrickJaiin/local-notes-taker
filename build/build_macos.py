@@ -25,11 +25,8 @@ SETUP_PY = PROJECT_ROOT / "setup_macos.py"
 
 def check_assets():
     binary = ASSETS_DIR / "ollama"
-    models = ASSETS_DIR / "models"
     if not binary.exists():
         sys.exit(f"Missing bundled Ollama binary at {binary}.\nRun: python build/download_assets.py")
-    if not models.exists() or not any(models.iterdir()):
-        sys.exit(f"Missing model blobs at {models}.\nRun: python build/download_assets.py")
 
 
 def write_setup_py():

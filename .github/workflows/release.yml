@@ -24,10 +24,10 @@ jobs:
         run: |
           pip install -e .
           pip install py2app requests
-          pip install "setuptools<76"
+          pip install "setuptools<72"
 
       - name: Download assets
-        run: python build/download_assets.py --platform macos-arm64
+        run: python build/download_assets.py --platform macos-arm64 --skip-model
 
       - name: Set bundled mode
         run: "sed -i '' 's/ollama_mode: external/ollama_mode: bundled/' config.yaml"
@@ -57,7 +57,7 @@ jobs:
           pip install pyinstaller requests
 
       - name: Download assets
-        run: python build/download_assets.py --platform windows-amd64
+        run: python build/download_assets.py --platform windows-amd64 --skip-model
 
       - name: Set bundled mode
         shell: pwsh
