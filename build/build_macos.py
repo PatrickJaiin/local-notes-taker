@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Build a macOS .app bundle and .dmg using py2app.
+"""Build a macOS .app bundle and .dmg using PyInstaller.
 
 Prerequisites:
-    pip install py2app
+    pip install pyinstaller
     python build/download_assets.py   # populates assets/
 
 Usage:
     python build/build_macos.py
 """
 
+import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -17,10 +19,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 DIST_DIR = PROJECT_ROOT / "dist"
-BUILD_DIR = PROJECT_ROOT / "build" / "py2app_build"
+BUILD_DIR = PROJECT_ROOT / "build" / "pyinstaller_build"
 APP_NAME = "Local Notes"
-
-SETUP_PY = PROJECT_ROOT / "setup_macos.py"
 
 
 def check_assets():
@@ -29,60 +29,52 @@ def check_assets():
         sys.exit(f"Missing bundled Ollama binary at {binary}.\nRun: python build/download_assets.py")
 
 
-def write_setup_py():
-    """Generate a temporary setup.py for py2app."""
-    assets_files = []
-    for p in ASSETS_DIR.rglob("*"):
-        if p.is_file():
-            rel = p.relative_to(PROJECT_ROOT)
-            assets_files.append(str(rel))
-
-    setup_content = f'''\
-from setuptools import setup
-
-APP = ["app/main.py"]
-DATA_FILES = []
-OPTIONS = {{
-    "argv_emulation": False,
-    "iconfile": None,
-    "plist": {{
-        "CFBundleName": "{APP_NAME}",
-        "CFBundleDisplayName": "{APP_NAME}",
-        "CFBundleIdentifier": "com.localnotes.app",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
-        "LSUIElement": True,
-        "NSMicrophoneUsageDescription": "Local Notes needs microphone access to record audio for transcription.",
-    }},
-    "packages": ["app", "ollama", "faster_whisper", "ctranslate2", "yaml", "rumps", "pynput"],
-    "includes": ["requests"],
-    "resources": {assets_files!r} + ["config.yaml"],
-}}
-
-setup(
-    app=APP,
-    data_files=DATA_FILES,
-    options={{"py2app": OPTIONS}},
-)
-'''
-    SETUP_PY.write_text(setup_content)
-    return SETUP_PY
-
-
 def build_app():
-    setup = write_setup_py()
-    try:
-        subprocess.run(
-            [sys.executable, str(setup), "py2app"],
-            cwd=str(PROJECT_ROOT),
-            check=True,
-        )
-    finally:
-        setup.unlink(missing_ok=True)
+    models = ASSETS_DIR / "models"
+    add_data = [
+        f"{ASSETS_DIR / 'ollama'}{os.pathsep}assets",
+        f"{PROJECT_ROOT / 'config.yaml'}{os.pathsep}.",
+    ]
+    if models.exists() and any(models.iterdir()):
+        add_data.append(f"{models}{os.pathsep}assets/models")
+
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--name", APP_NAME,
+        "--onedir",
+        "--windowed",
+        "--distpath", str(DIST_DIR),
+        "--workpath", str(BUILD_DIR),
+        "--osx-bundle-identifier", "com.localnotes.app",
+    ]
+
+    for item in add_data:
+        cmd.extend(["--add-data", item])
+
+    for mod in ["ollama", "faster_whisper", "ctranslate2", "yaml", "rumps", "requests", "pynput"]:
+        cmd.extend(["--hidden-import", mod])
+
+    cmd.append(str(PROJECT_ROOT / "app" / "main.py"))
+
+    print("Running PyInstaller...")
+    subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
 
     app_path = DIST_DIR / f"{APP_NAME}.app"
     if not app_path.exists():
         sys.exit(f"Build failed - {app_path} not found")
+
+    # Update Info.plist with macOS-specific settings
+    plist_path = app_path / "Contents" / "Info.plist"
+    if plist_path.exists():
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+        plist["LSUIElement"] = True
+        plist["NSMicrophoneUsageDescription"] = (
+            "Local Notes needs microphone access to record audio for transcription."
+        )
+        with open(plist_path, "wb") as f:
+            plistlib.dump(plist, f)
+
     print(f"Built: {app_path}")
     return app_path
 

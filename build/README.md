@@ -4,7 +4,7 @@
 
 - Python 3.9+
 - `requests` (`pip install requests`)
-- **macOS**: `py2app` (`pip install py2app`)
+- **macOS**: `PyInstaller` (`pip install pyinstaller`)
 - **Windows**: `PyInstaller` (`pip install pyinstaller`)
 
 ## Step 1: Download Assets
