@@ -19,11 +19,13 @@ import sys as _sys
 
 if getattr(_sys, "frozen", False):
     _BASE_DIR = Path(_sys._MEIPASS)
+    _DATA_DIR = Path.home() / "Library" / "Application Support" / "Local Notes"
 else:
     _BASE_DIR = Path(__file__).resolve().parent.parent
+    _DATA_DIR = _BASE_DIR
 
 CONFIG_PATH = _BASE_DIR / "config.yaml"
-TRANSCRIPTS_DIR = _BASE_DIR / "transcripts"
+TRANSCRIPTS_DIR = _DATA_DIR / "transcripts"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 

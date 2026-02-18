@@ -67,8 +67,13 @@ class OllamaManager:
         )
 
     def _find_models_dir(self) -> Path:
-        root = _app_root()
-        models = root / "assets" / "models"
+        if getattr(sys, "frozen", False):
+            # Use writable user directory for models (app bundle may be read-only)
+            support = Path.home() / "Library" / "Application Support" / "Local Notes"
+            models = support / "models"
+        else:
+            root = _app_root()
+            models = root / "assets" / "models"
         models.mkdir(parents=True, exist_ok=True)
         return models
 
