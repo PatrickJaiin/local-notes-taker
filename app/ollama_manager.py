@@ -69,8 +69,7 @@ class OllamaManager:
     def _find_models_dir(self) -> Path:
         root = _app_root()
         models = root / "assets" / "models"
-        if not models.exists():
-            raise FileNotFoundError(f"Bundled models directory not found at {models}")
+        models.mkdir(parents=True, exist_ok=True)
         return models
 
     def start(self) -> str:
@@ -82,6 +81,7 @@ class OllamaManager:
             return self._host
 
         binary = self._find_binary()
+        binary.chmod(0o755)
         models_dir = self._find_models_dir()
 
         env = os.environ.copy()
@@ -110,6 +110,24 @@ class OllamaManager:
                 pass
             time.sleep(0.5)
         raise TimeoutError(f"Ollama did not become ready within {timeout}s on {self._host}")
+
+    def ensure_model(self, model: str):
+        """Pull the model if it's not already available."""
+        try:
+            r = requests.get(f"{self._host}/api/tags", timeout=5)
+            if r.status_code == 200:
+                models = [m["name"] for m in r.json().get("models", [])]
+                # Check both exact name and name without tag
+                if any(model in m or m in model for m in models):
+                    return
+        except Exception:
+            pass
+
+        binary = self._find_binary()
+        env = os.environ.copy()
+        env["OLLAMA_HOST"] = f"127.0.0.1:{self._port}" if self._port else "127.0.0.1:11434"
+        env["OLLAMA_MODELS"] = str(self._find_models_dir())
+        subprocess.run([str(binary), "pull", model], env=env, check=True)
 
     def stop(self):
         """Terminate the Ollama subprocess if running."""

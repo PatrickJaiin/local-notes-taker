@@ -335,8 +335,11 @@ class LocalNotesApp(rumps.App):
                 show_notification("Local Notes", "No speech detected.")
                 return
 
-            self._current_step = "Summarizing"
+            self._current_step = "Preparing model"
             ollama_model = self.config.get("ollama_model", "qwen3:8b")
+            self._ollama.ensure_model(ollama_model)
+
+            self._current_step = "Summarizing"
             summary = summarize(transcript, model=ollama_model, use_case=self._use_case, host=self._ollama_host)
 
             self._current_step = "Saving"

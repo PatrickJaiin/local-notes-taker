@@ -37,7 +37,10 @@ jobs:
       - name: Codesign and create DMG
         run: |
           codesign --force --deep --sign - "dist/Local Notes.app"
-          hdiutil create -volname "Local Notes" -srcfolder "dist/Local Notes.app" -ov -format UDZO "dist/Local Notes.dmg"
+          mkdir -p dist/dmg
+          cp -R "dist/Local Notes.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "Local Notes" -srcfolder dist/dmg -ov -format UDZO "dist/Local Notes.dmg"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
