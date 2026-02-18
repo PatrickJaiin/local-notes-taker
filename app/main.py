@@ -15,8 +15,15 @@ from app.recorder import Recorder
 from app.summarizer import summarize
 from app.transcriber import transcribe
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
-TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "transcripts"
+import sys as _sys
+
+if getattr(_sys, "frozen", False):
+    _BASE_DIR = Path(_sys._MEIPASS)
+else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+
+CONFIG_PATH = _BASE_DIR / "config.yaml"
+TRANSCRIPTS_DIR = _BASE_DIR / "transcripts"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
