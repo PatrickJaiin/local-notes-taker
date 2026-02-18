@@ -118,15 +118,15 @@ def pull_model(model: str, plat: str):
 
     try:
         import requests
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             try:
-                r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=2)
+                r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=10)
                 if r.status_code == 200:
                     break
-            except requests.ConnectionError:
+            except (requests.ConnectionError, requests.ReadTimeout):
                 pass
-            time.sleep(0.5)
+            time.sleep(1)
         else:
             sys.exit("Ollama server did not start in time")
 
