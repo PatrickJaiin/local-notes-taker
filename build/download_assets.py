@@ -24,11 +24,11 @@ import zipfile
 from pathlib import Path
 from urllib.request import urlretrieve
 
-OLLAMA_VERSION = "v0.6.2"
+OLLAMA_VERSION = "v0.16.2"
 
 DOWNLOAD_URLS = {
-    "macos-arm64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin-arm64.tgz",
-    "macos-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin-amd64.tgz",
+    "macos-arm64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin.tgz",
+    "macos-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin.tgz",
     "windows-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-windows-amd64.zip",
 }
 
