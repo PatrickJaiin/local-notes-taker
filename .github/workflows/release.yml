@@ -31,8 +31,13 @@ jobs:
       - name: Set bundled mode
         run: "sed -i '' 's/ollama_mode: external/ollama_mode: bundled/' config.yaml"
 
-      - name: Build .dmg
-        run: python build/build_macos.py
+      - name: Build .app
+        run: python build/build_macos.py --no-dmg
+
+      - name: Codesign and create DMG
+        run: |
+          codesign --force --deep --sign - "dist/Local Notes.app"
+          hdiutil create -volname "Local Notes" -srcfolder "dist/Local Notes.app" -ov -format UDZO "dist/Local Notes.dmg"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2

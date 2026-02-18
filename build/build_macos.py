@@ -100,6 +100,8 @@ def create_dmg(app_path: Path):
 
 
 def main():
+    skip_dmg = "--no-dmg" in sys.argv
+
     check_assets()
 
     if DIST_DIR.exists():
@@ -108,9 +110,12 @@ def main():
         shutil.rmtree(BUILD_DIR)
 
     app_path = build_app()
-    dmg_path = create_dmg(app_path)
 
-    print(f"\nDone! Distribute: {dmg_path}")
+    if skip_dmg:
+        print(f"\nDone! App bundle: {app_path}")
+    else:
+        dmg_path = create_dmg(app_path)
+        print(f"\nDone! Distribute: {dmg_path}")
 
 
 if __name__ == "__main__":
