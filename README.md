@@ -4,7 +4,7 @@ A Windows system tray app that records audio, transcribes it with Whisper, and g
 
 ## Download
 
-Grab the latest standalone `.zip` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and the Qwen3 model — no manual installation needed, just extract and run.
+Grab the latest standalone `.zip` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and automatically downloads the Qwen3 model on first launch — no manual installation needed.
 
 ## How It Works
 

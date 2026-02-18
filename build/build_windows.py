@@ -24,19 +24,18 @@ APP_NAME = "LocalNotes"
 
 def check_assets():
     binary = ASSETS_DIR / "ollama.exe"
-    models = ASSETS_DIR / "models"
     if not binary.exists():
         sys.exit(f"Missing bundled Ollama binary at {binary}.\nRun: python build/download_assets.py --platform windows-amd64")
-    if not models.exists() or not any(models.iterdir()):
-        sys.exit(f"Missing model blobs at {models}.\nRun: python build/download_assets.py --platform windows-amd64")
 
 
 def build_exe():
+    models = ASSETS_DIR / "models"
     add_data = [
         f"{ASSETS_DIR / 'ollama.exe'}{os.pathsep}assets",
-        f"{ASSETS_DIR / 'models'}{os.pathsep}assets/models",
         f"{PROJECT_ROOT / 'config.yaml'}{os.pathsep}.",
     ]
+    if models.exists() and any(models.iterdir()):
+        add_data.append(f"{models}{os.pathsep}assets/models")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
