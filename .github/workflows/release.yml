@@ -22,9 +22,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "setuptools<76"
           pip install -e .
           pip install py2app requests
+          pip install "setuptools<76"
 
       - name: Download assets
         run: python build/download_assets.py --platform macos-arm64
