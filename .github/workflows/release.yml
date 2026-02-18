@@ -22,9 +22,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e .
-          pip install py2app requests
-          pip install "setuptools<72"
+          pip install rumps pynput sounddevice numpy scipy faster-whisper ollama pyperclip pyyaml requests
+          pip install py2app
 
       - name: Download assets
         run: python build/download_assets.py --platform macos-arm64 --skip-model
