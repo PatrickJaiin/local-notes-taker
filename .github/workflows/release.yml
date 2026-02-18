@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install py2app requests
+
+      - name: Download assets
+        run: python build/download_assets.py --platform macos-arm64
+
+      - name: Set bundled mode
+        run: "sed -i '' 's/ollama_mode: external/ollama_mode: bundled/' config.yaml"
+
+      - name: Build .dmg
+        run: python build/build_macos.py
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Local Notes.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: windows
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pyinstaller requests
+
+      - name: Download assets
+        run: python build/download_assets.py --platform windows-amd64
+
+      - name: Set bundled mode
+        shell: pwsh
+        run: "(Get-Content config.yaml) -replace 'ollama_mode: external', 'ollama_mode: bundled' | Set-Content config.yaml"
+
+      - name: Build .exe
+        run: python build/build_windows.py
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LocalNotes.zip

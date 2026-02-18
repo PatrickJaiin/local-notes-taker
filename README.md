@@ -2,6 +2,12 @@
 
 A macOS menu bar app that records audio, transcribes it with Whisper, and generates structured notes using Ollama — all running locally on your machine. No cloud services, no API keys, complete privacy.
 
+## Download
+
+Grab the latest standalone `.dmg` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and the Qwen3 model — no manual installation needed, just open and go.
+
+> A Windows build (`.zip`) is also available on the Releases page, built from the [`windows`](https://github.com/PatrickJaiin/local-notes-taker/tree/windows) branch.
+
 ## Features
 
 - **Menu bar app** — lives in your macOS menu bar, always one click (or hotkey) away
@@ -12,13 +18,15 @@ A macOS menu bar app that records audio, transcribes it with Whisper, and genera
 - **Auto-paste** — summary is copied to clipboard and pasted into your active app
 - **Transcript history** — full transcripts and summaries saved to `transcripts/`
 
-## Prerequisites
+## Install from Source
+
+### Prerequisites
 
 - **macOS** (uses native menu bar and AppleScript)
 - **Python 3.9+**
 - **[Ollama](https://ollama.com)** installed and running
 
-## Installation
+### Installation
 
 ```bash
 git clone https://github.com/PatrickJaiin/local-notes-taker.git
@@ -79,6 +87,8 @@ ollama_model: qwen3:8b     # any model pulled in Ollama
 | `hotkey` | Global keyboard shortcut to toggle recording |
 | `whisper_model` | Whisper model size — smaller is faster, larger is more accurate |
 | `ollama_model` | Ollama model used for summarization |
+| `ollama_mode` | `external` (default, uses system Ollama) or `bundled` (uses packaged binary) |
+| `language` | Whisper language code (`en`, `hi`, `fr`, etc.) — empty for auto-detect |
 
 ## Transcripts
 

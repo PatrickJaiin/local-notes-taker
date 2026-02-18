@@ -51,6 +51,22 @@ python build/build_windows.py
 
 Output: `dist/LocalNotes.zip` containing the executable folder.
 
+## CI / Automated Releases
+
+The GitHub Actions workflow (`.github/workflows/release.yml`) builds and publishes release artifacts automatically. To trigger a release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+This will:
+1. Build the macOS `.dmg` from the `main` branch
+2. Build the Windows `.zip` from the `windows` branch
+3. Create a GitHub Release with both artifacts attached
+
+Releases appear at https://github.com/PatrickJaiin/local-notes-taker/releases.
+
 ## Configuration
 
 Set `ollama_mode` in `config.yaml`:
