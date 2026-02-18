@@ -1,4 +1,5 @@
 hotkey: <ctrl>+<shift>+i
 whisper_model: base        # tiny, base, small, medium, large-v3
 ollama_model: qwen3:8b     # any model pulled in ollama
+ollama_mode: external      # "external" (system Ollama) or "bundled" (packaged binary)
 language:                   # auto-detect if empty, or set: en, hi, ml, fr, etc.

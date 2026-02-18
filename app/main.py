@@ -11,6 +11,7 @@ import yaml
 from PIL import Image, ImageDraw
 from pynput import keyboard
 
+from app.ollama_manager import OllamaManager
 from app.output import auto_paste, copy_to_clipboard, show_notification
 from app.recorder import Recorder
 from app.summarizer import summarize
@@ -56,7 +57,7 @@ ICON_PROCESSING = _make_icon("#D9A04A") # orange
 
 
 def load_config() -> dict:
-    with open(CONFIG_PATH) as f:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -65,6 +66,12 @@ class LocalNotesApp:
         self.config = load_config()
         self.state = State.IDLE
         self.recorder = Recorder()
+
+        # Ollama lifecycle
+        ollama_mode = self.config.get("ollama_mode", "external")
+        self._ollama = OllamaManager(mode=ollama_mode)
+        self._ollama_host: str | None = None
+
         self._use_case = USE_CASES[0]
         self._language = self.config.get("language")
         self._current_step = ""
@@ -80,15 +87,24 @@ class LocalNotesApp:
         self._icon = pystray.Icon(
             "local-notes",
             icon=ICON_IDLE,
-            title="Local Notes — Idle",
+            title="Local Notes - Idle",
             menu=pystray.Menu(self._build_menu),
         )
 
         self._start_hotkey_listener()
 
+        # Start bundled Ollama in background so it's ready when needed
+        threading.Thread(target=self._start_ollama, daemon=True).start()
+
+    def _start_ollama(self):
+        try:
+            self._ollama_host = self._ollama.start()
+        except Exception as e:
+            show_notification("Local Notes", f"Ollama start failed: {e}")
+
     def _build_menu(self) -> list:
         """Dynamically build the tray menu (called each time the menu opens)."""
-        # Toggle recording item
+        # Toggle recording item - default=True makes left-click trigger it
         if self.state == State.IDLE:
             rec_label = "Start Recording"
         elif self.state == State.RECORDING:
@@ -96,18 +112,32 @@ class LocalNotesApp:
         else:
             rec_label = f"{self._current_step}..."
 
-        # Transcript preview (visible during/after recording)
+        # Transcript preview as a submenu with chunked lines
+        preview_items = []
         if self._transcript_so_far:
-            preview_text = self._transcript_so_far[-200:]
-            preview_label = f"Preview: {preview_text}"
+            words = self._transcript_so_far.split()
+            word_count = len(words)
+            # Show last ~300 chars, split into ~60-char lines
+            tail = self._transcript_so_far[-300:]
+            lines = [tail[i:i + 60] for i in range(0, len(tail), 60)]
+            for line in lines:
+                preview_items.append(pystray.MenuItem(line, None, enabled=False))
+            preview_items.append(pystray.Menu.SEPARATOR)
+            preview_items.append(pystray.MenuItem(
+                f"Copy transcript ({word_count} words)",
+                self._on_copy_transcript,
+            ))
+            preview_label = f"Preview ({word_count} words)"
         elif self.state == State.RECORDING:
-            preview_label = "Preview: (listening...)"
+            preview_items.append(pystray.MenuItem("(listening...)", None, enabled=False))
+            preview_label = "Preview"
         else:
-            preview_label = "Transcript Preview"
+            preview_items.append(pystray.MenuItem("No transcript yet", None, enabled=False))
+            preview_label = "Preview"
 
         items = [
-            pystray.MenuItem(rec_label, self._on_toggle_recording),
-            pystray.MenuItem(preview_label, self._on_copy_transcript),
+            pystray.MenuItem(rec_label, self._on_toggle_recording, default=True),
+            pystray.MenuItem(preview_label, pystray.Menu(*preview_items)),
             pystray.Menu.SEPARATOR,
         ]
 
@@ -169,7 +199,7 @@ class LocalNotesApp:
                     self._transcript_so_far += (" " + chunk_text if self._transcript_so_far else chunk_text)
                     # Update tooltip with word count
                     word_count = len(self._transcript_so_far.split())
-                    self._icon.title = f"Local Notes — Recording ({word_count} words)"
+                    self._icon.title = f"Local Notes - Recording ({word_count} words)"
             finally:
                 self._incremental_temps.append(path)
 
@@ -246,7 +276,7 @@ class LocalNotesApp:
     def _start_recording(self):
         self.state = State.RECORDING
         self._icon.icon = ICON_RECORDING
-        self._icon.title = "Local Notes — Recording"
+        self._icon.title = "Local Notes - Recording"
         self._transcript_so_far = ""
         self._flush_stop.clear()
         self._incremental_temps = []
@@ -258,7 +288,7 @@ class LocalNotesApp:
         self._current_step = "Processing"
         self._processing_done = False
         self._icon.icon = ICON_PROCESSING
-        self._icon.title = "Local Notes — Processing"
+        self._icon.title = "Local Notes - Processing"
 
         thread = threading.Thread(target=self._process, daemon=True)
         thread.start()
@@ -274,7 +304,8 @@ class LocalNotesApp:
             f"{'=' * 40}\n\n"
             f"TRANSCRIPT:\n{transcript}\n\n"
             f"{'=' * 40}\n\n"
-            f"SUMMARY:\n{summary}\n"
+            f"SUMMARY:\n{summary}\n",
+            encoding="utf-8",
         )
 
     def _process(self):
@@ -284,12 +315,12 @@ class LocalNotesApp:
             self._flush_stop.set()
 
             self._current_step = "Saving audio"
-            self._icon.title = "Local Notes — Saving audio"
+            self._icon.title = "Local Notes - Saving audio"
             audio_path = self.recorder.stop()
 
             # Transcribe only the remaining tail audio
             self._current_step = "Transcribing tail"
-            self._icon.title = "Local Notes — Transcribing tail"
+            self._icon.title = "Local Notes - Transcribing tail"
             whisper_model = self.config.get("whisper_model", "base")
             tail_text = transcribe(audio_path, model_size=whisper_model, language=self._language)
             if tail_text.strip():
@@ -301,16 +332,16 @@ class LocalNotesApp:
                 return
 
             self._current_step = "Summarizing"
-            self._icon.title = "Local Notes — Summarizing"
+            self._icon.title = "Local Notes - Summarizing"
             ollama_model = self.config.get("ollama_model", "qwen3:8b")
-            summary = summarize(transcript, model=ollama_model, use_case=self._use_case)
+            summary = summarize(transcript, model=ollama_model, use_case=self._use_case, host=self._ollama_host)
 
             self._current_step = "Saving"
-            self._icon.title = "Local Notes — Saving"
+            self._icon.title = "Local Notes - Saving"
             self._save_transcript(transcript, summary)
 
             self._current_step = "Copying"
-            self._icon.title = "Local Notes — Copying"
+            self._icon.title = "Local Notes - Copying"
             copy_to_clipboard(summary)
             show_notification("Local Notes", "Summary copied to clipboard!")
             auto_paste()
@@ -334,7 +365,7 @@ class LocalNotesApp:
     def _reset(self):
         self.state = State.IDLE
         self._icon.icon = ICON_IDLE
-        self._icon.title = "Local Notes — Idle"
+        self._icon.title = "Local Notes - Idle"
 
     def _poll_loop(self):
         """Background thread that dispatches hotkey actions."""
@@ -353,7 +384,10 @@ class LocalNotesApp:
 
 def main():
     app = LocalNotesApp()
-    app.run()
+    try:
+        app.run()
+    finally:
+        app._ollama.stop()
 
 
 if __name__ == "__main__":
