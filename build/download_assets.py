@@ -24,11 +24,11 @@ import zipfile
 from pathlib import Path
 from urllib.request import urlretrieve
 
-OLLAMA_VERSION = "v0.6.2"
+OLLAMA_VERSION = "v0.16.2"
 
 DOWNLOAD_URLS = {
-    "macos-arm64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin-arm64.tgz",
-    "macos-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin-amd64.tgz",
+    "macos-arm64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin.tgz",
+    "macos-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-darwin.tgz",
     "windows-amd64": f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/ollama-windows-amd64.zip",
 }
 
@@ -118,15 +118,15 @@ def pull_model(model: str, plat: str):
 
     try:
         import requests
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             try:
-                r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=2)
+                r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=10)
                 if r.status_code == 200:
                     break
-            except requests.ConnectionError:
+            except (requests.ConnectionError, requests.ReadTimeout):
                 pass
-            time.sleep(0.5)
+            time.sleep(1)
         else:
             sys.exit("Ollama server did not start in time")
 
