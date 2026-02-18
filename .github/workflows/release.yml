@@ -34,13 +34,23 @@ jobs:
       - name: Build .app
         run: python build/build_macos.py --no-dmg
 
-      - name: Codesign and create DMG
+      - name: Codesign app
+        run: codesign --force --deep --sign - "dist/Local Notes.app"
+
+      - name: Create styled DMG
         run: |
-          codesign --force --deep --sign - "dist/Local Notes.app"
-          mkdir -p dist/dmg
-          cp -R "dist/Local Notes.app" dist/dmg/
-          ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "Local Notes" -srcfolder dist/dmg -ov -format UDZO "dist/Local Notes.dmg"
+          brew install create-dmg
+          create-dmg \
+            --volname "Local Notes" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Local Notes.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "Local Notes.app" \
+            --no-internet-enable \
+            "dist/Local Notes.dmg" \
+            "dist/Local Notes.app"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
