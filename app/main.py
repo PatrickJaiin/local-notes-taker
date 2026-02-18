@@ -9,6 +9,7 @@ import yaml
 from AppKit import NSApp, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular, NSWorkspace
 from pynput import keyboard
 
+from app.ollama_manager import OllamaManager
 from app.output import auto_paste, copy_to_clipboard, show_notification
 from app.recorder import Recorder
 from app.summarizer import summarize
@@ -51,6 +52,12 @@ class LocalNotesApp(rumps.App):
         self.config = load_config()
         self.state = State.IDLE
         self.recorder = Recorder()
+
+        # Ollama lifecycle
+        ollama_mode = self.config.get("ollama_mode", "external")
+        self._ollama = OllamaManager(mode=ollama_mode)
+        self._ollama_host: str | None = None
+
         self._use_case = USE_CASES[0]
         self._language = self.config.get("language")
         self._current_step = ""
@@ -98,6 +105,15 @@ class LocalNotesApp(rumps.App):
         # updates happen on the main thread, avoiding AppKit crashes.
         self._poll_timer = rumps.Timer(self._tick, 0.15)
         self._poll_timer.start()
+
+        # Start bundled Ollama in background so it's ready when needed
+        threading.Thread(target=self._start_ollama, daemon=True).start()
+
+    def _start_ollama(self):
+        try:
+            self._ollama_host = self._ollama.start()
+        except Exception as e:
+            show_notification("Local Notes", f"Ollama start failed: {e}")
 
     def _start_hotkey_listener(self):
         hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+n")
@@ -314,7 +330,7 @@ class LocalNotesApp(rumps.App):
 
             self._current_step = "Summarizing"
             ollama_model = self.config.get("ollama_model", "qwen3:8b")
-            summary = summarize(transcript, model=ollama_model, use_case=self._use_case)
+            summary = summarize(transcript, model=ollama_model, use_case=self._use_case, host=self._ollama_host)
 
             self._current_step = "Saving"
             self._save_transcript(transcript, summary)
@@ -348,7 +364,10 @@ class LocalNotesApp(rumps.App):
 
 def main():
     app = LocalNotesApp()
-    app.run()
+    try:
+        app.run()
+    finally:
+        app._ollama.stop()
 
 
 if __name__ == "__main__":

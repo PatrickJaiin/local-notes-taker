@@ -6,3 +6,7 @@ transcripts/
 .env
 dist/
 *.egg-info/
+assets/
+build/py2app_build/
+build/pyinstaller_build/
+setup_macos.py
