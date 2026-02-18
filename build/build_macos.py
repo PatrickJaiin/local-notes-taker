@@ -66,7 +66,6 @@ setup(
     app=APP,
     data_files=DATA_FILES,
     options={{"py2app": OPTIONS}},
-    setup_requires=["py2app"],
 )
 '''
     SETUP_PY.write_text(setup_content)

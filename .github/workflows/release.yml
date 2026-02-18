@@ -22,6 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install "setuptools<76"
           pip install -e .
           pip install py2app requests
 
