@@ -2,6 +2,10 @@
 
 A Windows system tray app that records audio, transcribes it with Whisper, and generates structured notes using Ollama — all running locally on your machine. No cloud services, no API keys, complete privacy.
 
+## Download
+
+Grab the latest standalone `.zip` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and the Qwen3 model — no manual installation needed, just extract and run.
+
 ## How It Works
 
 1. You press a hotkey (or right-click the tray icon) to **start recording**
@@ -142,6 +146,7 @@ language:                      # leave empty for auto-detect, or set: en, hi, fr
 | `whisper_model` | Whisper model size — smaller = faster, larger = more accurate | `tiny`, `base`, `small`, `medium`, `large-v3` |
 | `ollama_model` | Which Ollama model generates summaries | `qwen3:8b`, `llama3:8b`, `mistral` |
 | `language` | Force a transcription language (empty = auto-detect) | `en`, `hi`, `ml`, `fr` |
+| `ollama_mode` | `external` (default, uses system Ollama) or `bundled` (uses packaged binary) | `external`, `bundled` |
 
 After editing, restart the app for changes to take effect.
 
