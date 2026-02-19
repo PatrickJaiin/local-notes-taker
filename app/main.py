@@ -57,7 +57,7 @@ def load_config() -> dict:
 
 class LocalNotesApp(rumps.App):
     def __init__(self):
-        super().__init__("Local Notes", title="📝")
+        super().__init__("📝")
         self.config = load_config()
         self.state = State.IDLE
         self.recorder = Recorder()
@@ -375,6 +375,7 @@ class LocalNotesApp(rumps.App):
 
 
 def main():
+    NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     app = LocalNotesApp()
     try:
         app.run()
