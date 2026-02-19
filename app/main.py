@@ -17,8 +17,17 @@ from app.recorder import Recorder
 from app.summarizer import summarize
 from app.transcriber import transcribe
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
-TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "transcripts"
+import sys as _sys
+
+if getattr(_sys, "frozen", False):
+    _BASE_DIR = Path(_sys._MEIPASS)
+    _DATA_DIR = Path.home() / "AppData" / "Local" / "Local Notes"
+else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+    _DATA_DIR = _BASE_DIR
+
+CONFIG_PATH = _BASE_DIR / "config.yaml"
+TRANSCRIPTS_DIR = _DATA_DIR / "transcripts"
 
 USE_CASES = ["Meeting", "Lecture", "Brainstorm", "Interview", "Stand-up"]
 
@@ -331,9 +340,13 @@ class LocalNotesApp:
                 show_notification("Local Notes", "No speech detected.")
                 return
 
+            self._current_step = "Preparing model"
+            self._icon.title = "Local Notes - Preparing model"
+            ollama_model = self.config.get("ollama_model", "qwen3:8b")
+            self._ollama.ensure_model(ollama_model)
+
             self._current_step = "Summarizing"
             self._icon.title = "Local Notes - Summarizing"
-            ollama_model = self.config.get("ollama_model", "qwen3:8b")
             summary = summarize(transcript, model=ollama_model, use_case=self._use_case, host=self._ollama_host)
 
             self._current_step = "Saving"
