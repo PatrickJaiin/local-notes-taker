@@ -1,6 +1,6 @@
 # Local Notes Taker
 
-A macOS menu bar app that records audio, transcribes it with Whisper, and generates structured notes using Ollama — all running locally on your machine. No cloud services, no API keys, complete privacy.
+A macOS menu bar app that records audio, transcribes it with Whisper, and generates structured notes using Ollama, all running locally on your machine. No cloud services, no API keys, complete privacy.
 
 ## Download
 
@@ -17,6 +17,7 @@ Grab the latest standalone `.dmg` from the [Releases page](https://github.com/Pa
 - **Use case presets** — Meeting, Lecture, Brainstorm, Interview, Stand-up, or custom
 - **Auto-paste** — summary is copied to clipboard and pasted into your active app
 - **Transcript history** — full transcripts and summaries saved to `transcripts/`
+- **Open transcripts quickly** — menu action opens the transcripts folder directly
 
 ## Install from Source
 
@@ -78,8 +79,8 @@ All settings live in `config.yaml`:
 
 ```yaml
 hotkey: <cmd>+<shift>+i
-whisper_model: base        # tiny, base, small, medium, large-v3
-ollama_model: qwen3:8b     # any model pulled in Ollama
+whisper_model: large-v3-turbo   # tiny, base, small, medium, large-v3, large-v3-turbo
+ollama_model: qwen3:8b          # any model pulled in Ollama
 ```
 
 | Option | Description |

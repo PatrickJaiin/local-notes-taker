@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 from datetime import datetime
 from enum import Enum, auto
@@ -6,7 +7,13 @@ from pathlib import Path
 
 import rumps
 import yaml
-from AppKit import NSApp, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular, NSWorkspace
+from AppKit import (
+    NSApp,
+    NSApplication,
+    NSApplicationActivationPolicyAccessory,
+    NSApplicationActivationPolicyRegular,
+    NSWorkspace,
+)
 from pynput import keyboard
 
 from app.ollama_manager import OllamaManager
@@ -24,7 +31,15 @@ else:
     _BASE_DIR = Path(__file__).resolve().parent.parent
     _DATA_DIR = _BASE_DIR
 
-CONFIG_PATH = _BASE_DIR / "config.yaml"
+DEFAULT_CONFIG = {
+    "hotkey": "<cmd>+<shift>+i",
+    "whisper_model": "large-v3-turbo",
+    "ollama_model": "qwen3:8b",
+    "ollama_mode": "external",
+    "language": None,
+}
+
+CONFIG_PATH = _DATA_DIR / "config.yaml" if getattr(_sys, "frozen", False) else _BASE_DIR / "config.yaml"
 TRANSCRIPTS_DIR = _DATA_DIR / "transcripts"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -50,9 +65,41 @@ class State(Enum):
     PROCESSING = auto()
 
 
+def _ensure_config_file() -> None:
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if CONFIG_PATH.exists():
+        return
+
+    if not getattr(_sys, "frozen", False):
+        CONFIG_PATH.write_text(yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
+        return
+
+    bundled_config = _BASE_DIR / "config.yaml"
+    if bundled_config.exists():
+        CONFIG_PATH.write_text(bundled_config.read_text(encoding="utf-8"), encoding="utf-8")
+        return
+
+    CONFIG_PATH.write_text(yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
+
+
 def load_config() -> dict:
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+    _ensure_config_file()
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+
+    config = {**DEFAULT_CONFIG, **loaded}
+    mode = config.get("ollama_mode")
+    if mode not in {"external", "bundled"}:
+        config["ollama_mode"] = DEFAULT_CONFIG["ollama_mode"]
+    if config.get("language") == "":
+        config["language"] = None
+    return config
+
+
+def _slugify_filename(text: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip().lower())
+    slug = slug.strip("-")
+    return slug or "note"
 
 
 class LocalNotesApp(rumps.App):
@@ -104,13 +151,15 @@ class LocalNotesApp(rumps.App):
         self.menu = [
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             self._transcript_preview,
+            rumps.MenuItem("Open Transcripts Folder", callback=self._open_transcripts_folder),
             None,
             use_case_menu,
             lang_menu,
             None,
+            rumps.MenuItem("Quit", callback=self._quit),
         ]
         self._start_hotkey_listener()
-        # Single poll timer created on main thread — guarantees all UI
+        # Single poll timer created on main thread - guarantees all UI
         # updates happen on the main thread, avoiding AppKit crashes.
         self._poll_timer = rumps.Timer(self._tick, 0.15)
         self._poll_timer.start()
@@ -125,8 +174,13 @@ class LocalNotesApp(rumps.App):
             show_notification("Local Notes", f"Ollama start failed: {e}")
 
     def _start_hotkey_listener(self):
-        hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+n")
-        hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), self._on_hotkey)
+        hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+i")
+        try:
+            hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), self._on_hotkey)
+        except ValueError:
+            hotkey_str = DEFAULT_CONFIG["hotkey"]
+            hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), self._on_hotkey)
+            show_notification("Local Notes", f"Invalid hotkey in config. Using default: {hotkey_str}")
         listener = keyboard.Listener(
             on_press=lambda k: hotkey.press(listener.canonical(k)),
             on_release=lambda k: hotkey.release(listener.canonical(k)),
@@ -219,6 +273,13 @@ class LocalNotesApp(rumps.App):
         sender.state = 1
         self._language = sender.title
 
+    def _open_transcripts_folder(self, sender):
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        NSWorkspace.sharedWorkspace().openFile_(str(TRANSCRIPTS_DIR))
+
+    def _quit(self, sender):
+        rumps.quit_application()
+
     def _uncheck_all_languages(self):
         for item in self.menu["Language"].values():
             if isinstance(item, rumps.MenuItem):
@@ -284,13 +345,19 @@ class LocalNotesApp(rumps.App):
             self._stop_recording()
 
     def _start_recording(self):
+        try:
+            self.recorder.start()
+        except Exception as e:
+            show_notification("Local Notes - Error", f"Could not start recording: {e}")
+            self._reset()
+            return
+
         self.state = State.RECORDING
         self.title = "🔴"
         self.menu["Start Recording"].title = "Stop Recording"
         self._transcript_so_far = ""
         self._flush_stop.clear()
         self._incremental_temps = []
-        self.recorder.start()
         threading.Thread(target=self._incremental_transcribe_loop, daemon=True).start()
 
     def _stop_recording(self):
@@ -303,9 +370,9 @@ class LocalNotesApp(rumps.App):
         thread.start()
 
     def _save_transcript(self, transcript: str, summary: str):
-        TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        use_case_slug = self._use_case.lower().replace(" ", "-")
+        use_case_slug = _slugify_filename(self._use_case)
         filepath = TRANSCRIPTS_DIR / f"{ts}_{use_case_slug}.txt"
         filepath.write_text(
             f"Use Case: {self._use_case}\n"
@@ -313,7 +380,8 @@ class LocalNotesApp(rumps.App):
             f"{'=' * 40}\n\n"
             f"TRANSCRIPT:\n{transcript}\n\n"
             f"{'=' * 40}\n\n"
-            f"SUMMARY:\n{summary}\n"
+            f"SUMMARY:\n{summary}\n",
+            encoding="utf-8",
         )
 
     def _process(self):
@@ -375,6 +443,7 @@ class LocalNotesApp(rumps.App):
 
 
 def main():
+    NSApplication.sharedApplication()
     NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     app = LocalNotesApp()
     try:

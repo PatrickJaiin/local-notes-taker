@@ -16,7 +16,11 @@ class Recorder:
         self._lock = threading.Lock()
 
     def _callback(self, indata, frames, time_info, status):
-        self._chunks.append(indata.copy())
+        if status:
+            # Keep recording even with transient stream warnings.
+            pass
+        with self._lock:
+            self._chunks.append(indata.copy())
 
     def start(self):
         with self._lock:

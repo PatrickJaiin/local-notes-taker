@@ -6,9 +6,15 @@ _model_cache: dict[str, WhisperModel] = {}
 
 def _get_model(model_size: str) -> WhisperModel:
     if model_size not in _model_cache:
-        _model_cache[model_size] = WhisperModel(
-            model_size, device="cpu", compute_type="int8"
-        )
+        try:
+            _model_cache[model_size] = WhisperModel(
+                model_size, device="cpu", compute_type="int8"
+            )
+        except ValueError:
+            # Fallback for environments where int8 kernels are unavailable.
+            _model_cache[model_size] = WhisperModel(
+                model_size, device="cpu", compute_type="float32"
+            )
     return _model_cache[model_size]
 
 

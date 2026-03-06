@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import ollama
 import requests
 
 
@@ -118,6 +119,19 @@ class OllamaManager:
 
     def ensure_model(self, model: str):
         """Pull the model if it's not already available."""
+        if self.mode != "bundled":
+            client = ollama.Client(host=self._host)
+            try:
+                models = [m.get("model", "") for m in client.list().get("models", [])]
+                if model in models:
+                    return
+                client.pull(model)
+            except Exception as e:
+                raise RuntimeError(
+                    "Could not reach Ollama. Start the Ollama app/service and try again."
+                ) from e
+            return
+
         try:
             r = requests.get(f"{self._host}/api/tags", timeout=5)
             if r.status_code == 200:
