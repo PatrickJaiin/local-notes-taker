@@ -374,7 +374,8 @@ class LocalNotesApp(rumps.App):
         if self.state == State.RECORDING:
             threading.Thread(target=self._do_cancel_recording, daemon=True).start()
         elif self.state == State.PROCESSING:
-            pass
+            self._current_step = "Cancelling"
+            self._cancel_btn.hidden = True
 
     def _do_cancel_recording(self):
         """Background cleanup for a cancelled recording."""
