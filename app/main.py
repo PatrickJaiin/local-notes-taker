@@ -1,6 +1,8 @@
 import os
 import re
+import sys
 import threading
+import time
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -22,10 +24,10 @@ from app.recorder import Recorder
 from app.summarizer import summarize
 from app.transcriber import transcribe
 
-import sys as _sys
+VERSION = "0.1.0"
 
-if getattr(_sys, "frozen", False):
-    _BASE_DIR = Path(_sys._MEIPASS)
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys._MEIPASS)
     _DATA_DIR = Path.home() / "Library" / "Application Support" / "Local Notes"
 else:
     _BASE_DIR = Path(__file__).resolve().parent.parent
@@ -37,9 +39,10 @@ DEFAULT_CONFIG = {
     "ollama_model": "qwen3:8b",
     "ollama_mode": "external",
     "language": None,
+    "auto_paste": True,
 }
 
-CONFIG_PATH = _DATA_DIR / "config.yaml" if getattr(_sys, "frozen", False) else _BASE_DIR / "config.yaml"
+CONFIG_PATH = _DATA_DIR / "config.yaml" if getattr(sys, "frozen", False) else _BASE_DIR / "config.yaml"
 TRANSCRIPTS_DIR = _DATA_DIR / "transcripts"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -70,7 +73,7 @@ def _ensure_config_file() -> None:
     if CONFIG_PATH.exists():
         return
 
-    if not getattr(_sys, "frozen", False):
+    if not getattr(sys, "frozen", False):
         CONFIG_PATH.write_text(yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
         return
 
@@ -102,9 +105,16 @@ def _slugify_filename(text: str) -> str:
     return slug or "note"
 
 
+def _format_duration(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 class LocalNotesApp(rumps.App):
     def __init__(self):
-        super().__init__("📝")
+        super().__init__("Local Notes", title="📝", quit_button=None)
         self.config = load_config()
         self.state = State.IDLE
         self.recorder = Recorder()
@@ -118,11 +128,30 @@ class LocalNotesApp(rumps.App):
         self._language = self.config.get("language")
         self._current_step = ""
         self._processing_done = False
+        self._processing_cancelled = False
         self._spinner_index = 0
         self._pending_action = None
         self._transcript_so_far = ""
         self._flush_stop = threading.Event()
         self._incremental_temps: list[str] = []
+        self._recording_start: float | None = None
+
+        # --- Build menu ---
+
+        # Record button
+        self._record_btn = rumps.MenuItem("Start Recording", callback=self.toggle_recording)
+
+        # Cancel button (hidden until recording/processing)
+        self._cancel_btn = rumps.MenuItem("Cancel", callback=self._cancel_processing)
+
+        # Transcript preview
+        self._transcript_preview = rumps.MenuItem(
+            "Transcript Preview", callback=self._copy_transcript,
+        )
+
+        # Ollama status
+        self._ollama_status = rumps.MenuItem("Ollama: Checking...")
+        self._ollama_status.set_callback(None)
 
         # Build use-case submenu with checkmarks
         use_case_menu = rumps.MenuItem("Use Case")
@@ -144,34 +173,58 @@ class LocalNotesApp(rumps.App):
         lang_menu.add(rumps.separator)
         lang_menu.add(rumps.MenuItem("Other...", callback=self._custom_language))
 
-        self._transcript_preview = rumps.MenuItem(
-            "Transcript Preview", callback=self._copy_transcript,
-        )
-
         self.menu = [
-            rumps.MenuItem("Start Recording", callback=self.toggle_recording),
+            self._record_btn,
+            self._cancel_btn,
             self._transcript_preview,
             rumps.MenuItem("Open Transcripts Folder", callback=self._open_transcripts_folder),
             None,
             use_case_menu,
             lang_menu,
             None,
+            self._ollama_status,
+            rumps.MenuItem("Reload Config", callback=self._reload_config),
+            None,
+            rumps.MenuItem(f"About Local Notes v{VERSION}", callback=self._show_about),
             rumps.MenuItem("Quit", callback=self._quit),
         ]
+
+        # Hide cancel button initially
+        self._cancel_btn.hidden = True
+
         self._start_hotkey_listener()
-        # Single poll timer created on main thread - guarantees all UI
-        # updates happen on the main thread, avoiding AppKit crashes.
+
+        # Single poll timer on main thread for all UI updates
         self._poll_timer = rumps.Timer(self._tick, 0.15)
         self._poll_timer.start()
 
-        # Start bundled Ollama in background so it's ready when needed
+        # Start Ollama in background
         threading.Thread(target=self._start_ollama, daemon=True).start()
+
+    # --- Ollama lifecycle ---
 
     def _start_ollama(self):
         try:
             self._ollama_host = self._ollama.start()
         except Exception as e:
-            show_notification("Local Notes", f"Ollama start failed: {e}")
+            show_notification("Local Notes", f"Ollama: {e}")
+
+        # Retry connection check a few times — Ollama may still be starting
+        for _ in range(5):
+            if self._ollama.check_connection():
+                break
+            time.sleep(2)
+
+        self._pending_action = self._update_ollama_status
+
+    def _update_ollama_status(self):
+        if self._ollama.is_ready:
+            model = self.config.get("ollama_model", "qwen3:8b")
+            self._ollama_status.title = f"Ollama: Connected ({model})"
+        else:
+            self._ollama_status.title = "Ollama: Not connected"
+
+    # --- Hotkey ---
 
     def _start_hotkey_listener(self):
         hotkey_str = self.config.get("hotkey", "<cmd>+<shift>+i")
@@ -187,6 +240,11 @@ class LocalNotesApp(rumps.App):
         )
         listener.daemon = True
         listener.start()
+
+    def _on_hotkey(self):
+        self._pending_action = lambda: self.toggle_recording(None)
+
+    # --- Menu callbacks ---
 
     def _select_use_case(self, sender):
         self._uncheck_all_use_cases()
@@ -219,7 +277,6 @@ class LocalNotesApp(rumps.App):
         self._uncheck_all_use_cases()
         self._use_case = custom_text
 
-        # Add to menu if it's new, and check it
         submenu = self.menu["Use Case"]
         if custom_text not in submenu:
             submenu.add(rumps.MenuItem(custom_text, callback=self._select_use_case))
@@ -228,7 +285,6 @@ class LocalNotesApp(rumps.App):
     def _select_language(self, sender):
         self._uncheck_all_languages()
         sender.state = 1
-        # Look up the code for this label
         code = None
         for label, c in LANGUAGES:
             if label == sender.title:
@@ -262,7 +318,6 @@ class LocalNotesApp(rumps.App):
         self._uncheck_all_languages()
         self._language = code
 
-        # Add to menu if it's new, and check it
         submenu = self.menu["Language"]
         if code not in submenu:
             submenu.add(rumps.MenuItem(code, callback=self._select_custom_language))
@@ -277,8 +332,62 @@ class LocalNotesApp(rumps.App):
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         NSWorkspace.sharedWorkspace().openFile_(str(TRANSCRIPTS_DIR))
 
+    def _reload_config(self, sender):
+        self.config = load_config()
+        show_notification("Local Notes", "Config reloaded.")
+        self._update_ollama_status()
+
+    def _show_about(self, sender):
+        prev_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        NSApp.activateIgnoringOtherApps_(True)
+
+        rumps.alert(
+            title="Local Notes",
+            message=(
+                f"Version {VERSION}\n\n"
+                "Record, transcribe, and summarize audio locally.\n"
+                "Powered by Whisper and Ollama.\n\n"
+                f"Hotkey: {self.config.get('hotkey', 'N/A')}\n"
+                f"Whisper model: {self.config.get('whisper_model', 'N/A')}\n"
+                f"Ollama model: {self.config.get('ollama_model', 'N/A')}"
+            ),
+            ok="OK",
+        )
+
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        if prev_app:
+            prev_app.activateWithOptions_(1 << 1)
+
+    def _copy_transcript(self, sender):
+        if self._transcript_so_far:
+            copy_to_clipboard(self._transcript_so_far)
+            show_notification("Local Notes", "Transcript copied to clipboard!")
+
+    def _cancel_processing(self, sender):
+        """Cancel an in-progress recording or processing.
+        Sets flags only — actual cleanup happens on the background/tick threads
+        to avoid blocking the main thread."""
+        self._processing_cancelled = True
+        self._flush_stop.set()
+        if self.state == State.RECORDING:
+            threading.Thread(target=self._do_cancel_recording, daemon=True).start()
+        elif self.state == State.PROCESSING:
+            pass
+
+    def _do_cancel_recording(self):
+        """Background cleanup for a cancelled recording."""
+        self.recorder.cancel()
+        self._cleanup_temps()
+        self._pending_action = self._reset
+
     def _quit(self, sender):
+        if self.recorder.is_recording:
+            self.recorder.cancel()
         rumps.quit_application()
+
+    # --- Helpers ---
 
     def _uncheck_all_languages(self):
         for item in self.menu["Language"].values():
@@ -290,26 +399,7 @@ class LocalNotesApp(rumps.App):
             if isinstance(item, rumps.MenuItem):
                 item.state = 0
 
-    def _on_hotkey(self):
-        self._pending_action = lambda: self.toggle_recording(None)
-
-    def _copy_transcript(self, sender):
-        if self._transcript_so_far:
-            copy_to_clipboard(self._transcript_so_far)
-            show_notification("Local Notes", "Transcript copied to clipboard!")
-
-    def _incremental_transcribe_loop(self):
-        whisper_model = self.config.get("whisper_model", "base")
-        while not self._flush_stop.wait(10):
-            path = self.recorder.flush()
-            if path is None:
-                continue
-            try:
-                chunk_text = transcribe(path, model_size=whisper_model, language=self._language)
-                if chunk_text.strip():
-                    self._transcript_so_far += (" " + chunk_text if self._transcript_so_far else chunk_text)
-            finally:
-                self._incremental_temps.append(path)
+    # --- Main tick loop ---
 
     def _tick(self, _):
         """Runs on main thread: dispatches hotkey actions, animates spinner,
@@ -320,10 +410,22 @@ class LocalNotesApp(rumps.App):
             action()
 
         if self.state == State.RECORDING:
+            elapsed = time.time() - self._recording_start if self._recording_start else 0
             word_count = len(self._transcript_so_far.split()) if self._transcript_so_far else 0
-            self.title = f"🔴 ({word_count} words)" if word_count else "🔴"
-            preview = self._transcript_so_far[-200:] if self._transcript_so_far else "(listening...)"
-            self._transcript_preview.title = f"Preview: {preview}"
+            duration = _format_duration(elapsed)
+
+            if word_count:
+                self.title = f"🔴 {duration} \u2022 {word_count}w"
+            else:
+                self.title = f"🔴 {duration}"
+
+            if self._transcript_so_far:
+                snippet = self._transcript_so_far.strip()[-40:]
+                if len(self._transcript_so_far.strip()) > 40:
+                    snippet = "\u2026" + snippet
+                self._transcript_preview.title = f"{word_count}w: {snippet}"
+            else:
+                self._transcript_preview.title = "Listening..."
             return
 
         if self.state != State.PROCESSING:
@@ -335,8 +437,10 @@ class LocalNotesApp(rumps.App):
 
         frame = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
         self.title = f"{frame} {self._current_step}"
-        self.menu["Start Recording"].title = f"{self._current_step}..."
+        self._record_btn.title = f"{self._current_step}..."
         self._spinner_index += 1
+
+    # --- Recording flow ---
 
     def toggle_recording(self, sender):
         if self.state == State.IDLE:
@@ -348,15 +452,18 @@ class LocalNotesApp(rumps.App):
         try:
             self.recorder.start()
         except Exception as e:
-            show_notification("Local Notes - Error", f"Could not start recording: {e}")
+            show_notification("Local Notes", str(e))
             self._reset()
             return
 
         self.state = State.RECORDING
-        self.title = "🔴"
-        self.menu["Start Recording"].title = "Stop Recording"
+        self._recording_start = time.time()
+        self.title = "🔴 0s"
+        self._record_btn.title = "Stop Recording"
+        self._cancel_btn.hidden = False
         self._transcript_so_far = ""
         self._flush_stop.clear()
+        self._processing_cancelled = False
         self._incremental_temps = []
         threading.Thread(target=self._incremental_transcribe_loop, daemon=True).start()
 
@@ -365,36 +472,43 @@ class LocalNotesApp(rumps.App):
         self._current_step = "Processing"
         self._processing_done = False
         self._spinner_index = 0
+        self._record_btn.title = "Processing..."
 
         thread = threading.Thread(target=self._process, daemon=True)
         thread.start()
 
-    def _save_transcript(self, transcript: str, summary: str):
-        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        use_case_slug = _slugify_filename(self._use_case)
-        filepath = TRANSCRIPTS_DIR / f"{ts}_{use_case_slug}.txt"
-        filepath.write_text(
-            f"Use Case: {self._use_case}\n"
-            f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"{'=' * 40}\n\n"
-            f"TRANSCRIPT:\n{transcript}\n\n"
-            f"{'=' * 40}\n\n"
-            f"SUMMARY:\n{summary}\n",
-            encoding="utf-8",
-        )
+    def _incremental_transcribe_loop(self):
+        whisper_model = self.config.get("whisper_model", "base")
+        while not self._flush_stop.wait(10):
+            path = self.recorder.flush()
+            if path is None:
+                continue
+            try:
+                chunk_text = transcribe(path, model_size=whisper_model, language=self._language)
+                if chunk_text.strip():
+                    self._transcript_so_far += (" " + chunk_text if self._transcript_so_far else chunk_text)
+            except Exception:
+                pass
+            finally:
+                self._incremental_temps.append(path)
+
+    # --- Processing ---
 
     def _process(self):
         audio_path = None
         try:
-            # Stop the incremental loop and flush the tail
             self._flush_stop.set()
+
+            if self._processing_cancelled:
+                return
 
             self._current_step = "Saving audio"
             audio_path = self.recorder.stop()
 
-            # Transcribe only the remaining tail audio
-            self._current_step = "Transcribing tail"
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Transcribing"
             whisper_model = self.config.get("whisper_model", "base")
             tail_text = transcribe(audio_path, model_size=whisper_model, language=self._language)
             if tail_text.strip():
@@ -405,41 +519,85 @@ class LocalNotesApp(rumps.App):
                 show_notification("Local Notes", "No speech detected.")
                 return
 
-            self._current_step = "Preparing model"
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Connecting to Ollama"
             ollama_model = self.config.get("ollama_model", "qwen3:8b")
             self._ollama.ensure_model(ollama_model)
+
+            if self._processing_cancelled:
+                return
 
             self._current_step = "Summarizing"
             summary = summarize(transcript, model=ollama_model, use_case=self._use_case, host=self._ollama_host)
 
+            if self._processing_cancelled:
+                return
+
             self._current_step = "Saving"
             self._save_transcript(transcript, summary)
 
-            self._current_step = "Copying"
+            self._current_step = "Done"
             copy_to_clipboard(summary)
-            show_notification("Local Notes", "Summary copied to clipboard!")
-            auto_paste()
+
+            if self.config.get("auto_paste", True):
+                show_notification("Local Notes", "Summary copied and pasted!")
+                auto_paste()
+            else:
+                show_notification("Local Notes", "Summary copied to clipboard!")
 
         except Exception as e:
-            show_notification("Local Notes - Error", str(e))
+            if not self._processing_cancelled:
+                show_notification("Local Notes", str(e))
         finally:
             self._processing_done = True
-            for tmp in self._incremental_temps:
-                try:
-                    os.unlink(tmp)
-                except Exception:
-                    pass
+            self._cleanup_temps()
             if audio_path:
                 try:
                     os.unlink(audio_path)
                 except Exception:
                     pass
 
+    def _save_transcript(self, transcript: str, summary: str):
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        use_case_slug = _slugify_filename(self._use_case)
+        filepath = TRANSCRIPTS_DIR / f"{ts}_{use_case_slug}.txt"
+
+        duration = ""
+        if self._recording_start:
+            elapsed = time.time() - self._recording_start
+            duration = f"Duration: {_format_duration(elapsed)}\n"
+
+        word_count = len(transcript.split())
+        filepath.write_text(
+            f"Use Case: {self._use_case}\n"
+            f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"{duration}"
+            f"Words: {word_count}\n"
+            f"{'=' * 40}\n\n"
+            f"TRANSCRIPT:\n{transcript}\n\n"
+            f"{'=' * 40}\n\n"
+            f"SUMMARY:\n{summary}\n",
+            encoding="utf-8",
+        )
+
+    def _cleanup_temps(self):
+        for tmp in self._incremental_temps:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+        self._incremental_temps = []
+
     def _reset(self):
         self.state = State.IDLE
         self.title = "📝"
-        self.menu["Start Recording"].title = "Start Recording"
+        self._record_btn.title = "Start Recording"
+        self._cancel_btn.hidden = True
         self._transcript_preview.title = "Transcript Preview"
+        self._recording_start = None
 
 
 def main():

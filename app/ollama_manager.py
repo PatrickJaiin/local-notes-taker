@@ -24,10 +24,8 @@ def _find_free_port() -> int:
 
 
 def _app_root() -> Path:
-    """Return the application root, handling both dev and frozen (py2app/PyInstaller) layouts."""
+    """Return the application root, handling both dev and frozen layouts."""
     if getattr(sys, "frozen", False):
-        # py2app: .app/Contents/Resources
-        # PyInstaller: _MEIPASS or exe directory
         if hasattr(sys, "_MEIPASS"):
             return Path(sys._MEIPASS)
         return Path(sys.executable).resolve().parent.parent / "Resources"
@@ -42,6 +40,7 @@ class OllamaManager:
         self._process: subprocess.Popen | None = None
         self._port: int | None = None
         self._host: str | None = None
+        self._ready = False
 
         if mode == "bundled":
             self._port = _find_free_port()
@@ -53,9 +52,21 @@ class OllamaManager:
     def host(self) -> str:
         return self._host
 
+    @property
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def check_connection(self) -> bool:
+        """Quick connectivity check (non-blocking, short timeout)."""
+        try:
+            r = requests.get(f"{self._host}/api/tags", timeout=1.5)
+            self._ready = r.status_code == 200
+        except (requests.ConnectionError, requests.Timeout):
+            self._ready = False
+        return self._ready
+
     def _find_binary(self) -> Path:
         root = _app_root()
-        # Check bundled assets locations
         candidates = [
             root / "assets" / "ollama",
             root / "assets" / "ollama.exe",
@@ -69,7 +80,6 @@ class OllamaManager:
 
     def _find_models_dir(self) -> Path:
         if getattr(sys, "frozen", False):
-            # Use writable user directory for models (app bundle may be read-only)
             support = Path.home() / "Library" / "Application Support" / "Local Notes"
             models = support / "models"
         else:
@@ -79,11 +89,9 @@ class OllamaManager:
         return models
 
     def start(self) -> str:
-        """Start the Ollama server and return the host URL.
-
-        In external mode, just returns the default host without starting anything.
-        """
+        """Start the Ollama server and return the host URL."""
         if self.mode != "bundled":
+            self.check_connection()
             return self._host
 
         binary = self._find_binary()
@@ -102,6 +110,7 @@ class OllamaManager:
         )
         atexit.register(self.stop)
         self._wait_ready()
+        self._ready = True
         return self._host
 
     def _wait_ready(self, timeout: float = 30.0):
@@ -115,29 +124,34 @@ class OllamaManager:
             except requests.ConnectionError:
                 pass
             time.sleep(0.5)
-        raise TimeoutError(f"Ollama did not become ready within {timeout}s on {self._host}")
+        raise TimeoutError(f"Ollama did not start within {timeout}s")
 
     def ensure_model(self, model: str):
         """Pull the model if it's not already available."""
         if self.mode != "bundled":
             client = ollama.Client(host=self._host)
             try:
-                models = [m.get("model", "") for m in client.list().get("models", [])]
-                if model in models:
+                available = client.list()
+                models = [m.get("model", "") for m in available.get("models", [])]
+                # Match with or without tag suffix
+                if any(model == m or model.split(":")[0] == m.split(":")[0] for m in models):
                     return
                 client.pull(model)
             except Exception as e:
-                raise RuntimeError(
-                    "Could not reach Ollama. Start the Ollama app/service and try again."
-                ) from e
+                msg = str(e).lower()
+                if "connection" in msg or "refused" in msg:
+                    raise RuntimeError(
+                        "Cannot connect to Ollama. Make sure the Ollama app is running, "
+                        "then try again."
+                    ) from e
+                raise RuntimeError(f"Failed to pull model '{model}': {e}") from e
             return
 
         try:
             r = requests.get(f"{self._host}/api/tags", timeout=5)
             if r.status_code == 200:
                 models = [m["name"] for m in r.json().get("models", [])]
-                # Check both exact name and name without tag
-                if any(model in m or m in model for m in models):
+                if any(model == m or model.split(":")[0] == m.split(":")[0] for m in models):
                     return
         except Exception:
             pass
@@ -161,6 +175,7 @@ class OllamaManager:
             except ProcessLookupError:
                 pass
         self._process = None
+        self._ready = False
 
     @property
     def running(self) -> bool:
