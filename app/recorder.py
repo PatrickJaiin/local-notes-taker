@@ -60,39 +60,39 @@ class Recorder:
         tmp.close()
         return tmp.name
 
-    def stop(self) -> str:
-        """Stop recording and return the path to the WAV file."""
+    def _stop_stream(self):
+        """Stop and close the audio stream outside the lock to avoid deadlock."""
         with self._lock:
             self._recording = False
-            if self._stream is not None:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception:
-                    pass
-                self._stream = None
+            stream = self._stream
+            self._stream = None
+        # Stop outside lock — stream.stop() waits for the callback which needs the lock
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
+    def stop(self) -> str:
+        """Stop recording and return the path to the WAV file."""
+        self._stop_stream()
+
+        with self._lock:
             if not self._chunks:
                 raise RuntimeError("No audio was captured. Check your microphone.")
 
             audio = np.concatenate(self._chunks, axis=0)
-            audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
-
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
-            tmp.close()
             self._chunks = []
-            return tmp.name
+
+        audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
+        tmp.close()
+        return tmp.name
 
     def cancel(self):
         """Stop recording and discard all audio."""
+        self._stop_stream()
         with self._lock:
-            self._recording = False
-            if self._stream is not None:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception:
-                    pass
-                self._stream = None
             self._chunks = []
