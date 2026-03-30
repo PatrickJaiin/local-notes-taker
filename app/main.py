@@ -132,6 +132,7 @@ class LocalNotesApp(rumps.App):
         self._spinner_index = 0
         self._pending_action = None
         self._transcript_so_far = ""
+        self._last_summary = ""
         self._flush_stop = threading.Event()
         self._incremental_temps: list[str] = []
         self._recording_start: float | None = None
@@ -148,6 +149,9 @@ class LocalNotesApp(rumps.App):
         self._transcript_preview = rumps.MenuItem(
             "Transcript Preview", callback=self._copy_transcript,
         )
+
+        # Paste last summary
+        self._paste_last_btn = rumps.MenuItem("Paste Last Summary", callback=self._paste_last_summary)
 
         # Ollama status
         self._ollama_status = rumps.MenuItem("Ollama: Checking...")
@@ -177,6 +181,7 @@ class LocalNotesApp(rumps.App):
             self._record_btn,
             self._cancel_btn,
             self._transcript_preview,
+            self._paste_last_btn,
             rumps.MenuItem("Open Transcripts Folder", callback=self._open_transcripts_folder),
             None,
             use_case_menu,
@@ -365,6 +370,17 @@ class LocalNotesApp(rumps.App):
             copy_to_clipboard(self._transcript_so_far)
             show_notification("Local Notes", "Transcript copied to clipboard!")
 
+    def _paste_last_summary(self, sender):
+        if not self._last_summary:
+            show_notification("Local Notes", "No summary available yet.")
+            return
+        copy_to_clipboard(self._last_summary)
+        if self.config.get("auto_paste", True):
+            auto_paste()
+            show_notification("Local Notes", "Last summary pasted!")
+        else:
+            show_notification("Local Notes", "Last summary copied to clipboard!")
+
     def _cancel_processing(self, sender):
         """Cancel an in-progress recording or processing.
         Sets flags only — actual cleanup happens on the background/tick threads
@@ -540,6 +556,7 @@ class LocalNotesApp(rumps.App):
             self._save_transcript(transcript, summary)
 
             self._current_step = "Done"
+            self._last_summary = summary
             copy_to_clipboard(summary)
 
             if self.config.get("auto_paste", True):
