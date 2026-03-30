@@ -90,6 +90,7 @@ class LocalNotesApp:
         self._custom_languages: list[tuple[str, str]] = []
         self._stop_event = threading.Event()
         self._transcript_so_far = ""
+        self._last_summary = ""
         self._flush_stop = threading.Event()
         self._incremental_temps: list[str] = []
 
@@ -144,9 +145,18 @@ class LocalNotesApp:
             preview_items.append(pystray.MenuItem("No transcript yet", None, enabled=False))
             preview_label = "Preview"
 
+        # Paste last summary item
+        has_summary = bool(self._last_summary)
+        paste_last_item = pystray.MenuItem(
+            "Paste Last Summary",
+            self._on_paste_last_summary,
+            enabled=has_summary,
+        )
+
         items = [
             pystray.MenuItem(rec_label, self._on_toggle_recording, default=True),
             pystray.MenuItem(preview_label, pystray.Menu(*preview_items)),
+            paste_last_item,
             pystray.Menu.SEPARATOR,
         ]
 
@@ -195,6 +205,14 @@ class LocalNotesApp:
         if self._transcript_so_far:
             copy_to_clipboard(self._transcript_so_far)
             show_notification("Local Notes", "Transcript copied to clipboard!")
+
+    def _on_paste_last_summary(self, icon, item):
+        if not self._last_summary:
+            show_notification("Local Notes", "No summary available yet.")
+            return
+        copy_to_clipboard(self._last_summary)
+        auto_paste()
+        show_notification("Local Notes", "Last summary pasted!")
 
     def _incremental_transcribe_loop(self):
         whisper_model = self.config.get("whisper_model", "base")
@@ -355,6 +373,7 @@ class LocalNotesApp:
 
             self._current_step = "Copying"
             self._icon.title = "Local Notes - Copying"
+            self._last_summary = summary
             copy_to_clipboard(summary)
             show_notification("Local Notes", "Summary copied to clipboard!")
             auto_paste()
