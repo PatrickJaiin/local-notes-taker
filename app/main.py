@@ -132,6 +132,7 @@ class LocalNotesApp(rumps.App):
         self._spinner_index = 0
         self._pending_action = None
         self._transcript_so_far = ""
+        self._last_transcript = ""
         self._last_summary = ""
         self._flush_stop = threading.Event()
         self._incremental_temps: list[str] = []
@@ -149,6 +150,9 @@ class LocalNotesApp(rumps.App):
         self._transcript_preview = rumps.MenuItem(
             "Transcript Preview", callback=self._copy_transcript,
         )
+
+        # Paste last transcript
+        self._paste_last_transcript_btn = rumps.MenuItem("Paste Last Transcript", callback=self._paste_last_transcript)
 
         # Paste last summary
         self._paste_last_btn = rumps.MenuItem("Paste Last Summary", callback=self._paste_last_summary)
@@ -181,6 +185,7 @@ class LocalNotesApp(rumps.App):
             self._record_btn,
             self._cancel_btn,
             self._transcript_preview,
+            self._paste_last_transcript_btn,
             self._paste_last_btn,
             rumps.MenuItem("Open Transcripts Folder", callback=self._open_transcripts_folder),
             None,
@@ -370,6 +375,17 @@ class LocalNotesApp(rumps.App):
             copy_to_clipboard(self._transcript_so_far)
             show_notification("Local Notes", "Transcript copied to clipboard!")
 
+    def _paste_last_transcript(self, sender):
+        if not self._last_transcript:
+            show_notification("Local Notes", "No transcript available yet.")
+            return
+        copy_to_clipboard(self._last_transcript)
+        if self.config.get("auto_paste", True):
+            auto_paste()
+            show_notification("Local Notes", "Last transcript pasted!")
+        else:
+            show_notification("Local Notes", "Last transcript copied to clipboard!")
+
     def _paste_last_summary(self, sender):
         if not self._last_summary:
             show_notification("Local Notes", "No summary available yet.")
@@ -535,6 +551,8 @@ class LocalNotesApp(rumps.App):
             if not transcript:
                 show_notification("Local Notes", "No speech detected.")
                 return
+
+            self._last_transcript = transcript
 
             if self._processing_cancelled:
                 return
