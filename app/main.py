@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -18,6 +19,7 @@ from AppKit import (
 )
 from pynput import keyboard
 
+from app.audio_cleanup import clean_audio
 from app.ollama_manager import OllamaManager
 from app.output import auto_paste, copy_to_clipboard, show_notification
 from app.recorder import Recorder
@@ -44,6 +46,8 @@ DEFAULT_CONFIG = {
 
 CONFIG_PATH = _DATA_DIR / "config.yaml" if getattr(sys, "frozen", False) else _BASE_DIR / "config.yaml"
 TRANSCRIPTS_DIR = _DATA_DIR / "transcripts"
+RECORDINGS_DIR = _DATA_DIR / "recordings"
+KEEP_RECORDINGS = 2
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -153,6 +157,9 @@ class LocalNotesApp(rumps.App):
         # Paste last summary
         self._paste_last_btn = rumps.MenuItem("Paste Last Summary", callback=self._paste_last_summary)
 
+        # Redo last recording (clean + re-transcribe + re-summarize)
+        self._redo_last_btn = rumps.MenuItem("Redo Last Recording", callback=self._redo_last_recording)
+
         # Ollama status
         self._ollama_status = rumps.MenuItem("Ollama: Checking...")
         self._ollama_status.set_callback(None)
@@ -182,6 +189,7 @@ class LocalNotesApp(rumps.App):
             self._cancel_btn,
             self._transcript_preview,
             self._paste_last_btn,
+            self._redo_last_btn,
             rumps.MenuItem("Open Transcripts Folder", callback=self._open_transcripts_folder),
             None,
             use_case_menu,
@@ -370,6 +378,113 @@ class LocalNotesApp(rumps.App):
             copy_to_clipboard(self._transcript_so_far)
             show_notification("Local Notes", "Transcript copied to clipboard!")
 
+    def _redo_last_recording(self, sender):
+        if self.state != State.IDLE:
+            show_notification("Local Notes", "Finish the current recording first.")
+            return
+
+        recording = self._newest_recording()
+        if recording is None:
+            show_notification("Local Notes", "No saved recording to redo.")
+            return
+
+        self.state = State.PROCESSING
+        self._current_step = "Cleaning audio"
+        self._processing_done = False
+        self._processing_cancelled = False
+        self._spinner_index = 0
+        self._transcript_so_far = ""
+        self._record_btn.title = "Processing..."
+        self._cancel_btn.hidden = False
+
+        threading.Thread(
+            target=self._reprocess, args=(str(recording),), daemon=True
+        ).start()
+
+    def _newest_recording(self) -> Path | None:
+        if not RECORDINGS_DIR.exists():
+            return None
+        wavs = sorted(
+            RECORDINGS_DIR.glob("*.wav"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return wavs[0] if wavs else None
+
+    def _reprocess(self, audio_path: str):
+        cleaned_path = None
+        try:
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Cleaning audio"
+            try:
+                cleaned_path = clean_audio(audio_path)
+            except Exception:
+                cleaned_path = None
+
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Transcribing"
+            whisper_model = self.config.get("whisper_model", "base")
+            transcript = transcribe(
+                cleaned_path or audio_path,
+                model_size=whisper_model,
+                language=self._language,
+            ).strip()
+
+            if not transcript:
+                show_notification("Local Notes", "No speech detected.")
+                return
+
+            self._transcript_so_far = transcript
+
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Connecting to Ollama"
+            ollama_model = self.config.get("ollama_model", "qwen3:8b")
+            self._ollama.ensure_model(ollama_model)
+
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Summarizing"
+            summary = summarize(
+                transcript,
+                model=ollama_model,
+                use_case=self._use_case,
+                host=self._ollama_host,
+            )
+
+            if self._processing_cancelled:
+                return
+
+            self._current_step = "Saving"
+            self._save_transcript(transcript, summary)
+
+            self._current_step = "Done"
+            self._last_summary = summary
+            copy_to_clipboard(summary)
+
+            if self.config.get("auto_paste", True):
+                show_notification("Local Notes", "Summary copied and pasted!")
+                auto_paste()
+            else:
+                show_notification("Local Notes", "Summary copied to clipboard!")
+
+        except Exception as e:
+            if not self._processing_cancelled:
+                show_notification("Local Notes", str(e))
+        finally:
+            self._processing_done = True
+            if cleaned_path:
+                try:
+                    os.unlink(cleaned_path)
+                except Exception:
+                    pass
+
     def _paste_last_summary(self, sender):
         if not self._last_summary:
             show_notification("Local Notes", "No summary available yet.")
@@ -513,6 +628,7 @@ class LocalNotesApp(rumps.App):
 
     def _process(self):
         audio_path = None
+        cleaned_path = None
         try:
             self._flush_stop.set()
 
@@ -525,9 +641,22 @@ class LocalNotesApp(rumps.App):
             if self._processing_cancelled:
                 return
 
+            self._current_step = "Cleaning audio"
+            try:
+                cleaned_path = clean_audio(audio_path)
+            except Exception:
+                cleaned_path = None
+
+            if self._processing_cancelled:
+                return
+
             self._current_step = "Transcribing"
             whisper_model = self.config.get("whisper_model", "base")
-            tail_text = transcribe(audio_path, model_size=whisper_model, language=self._language)
+            tail_text = transcribe(
+                cleaned_path or audio_path,
+                model_size=whisper_model,
+                language=self._language,
+            )
             if tail_text.strip():
                 self._transcript_so_far += (" " + tail_text if self._transcript_so_far else tail_text)
 
@@ -554,6 +683,7 @@ class LocalNotesApp(rumps.App):
 
             self._current_step = "Saving"
             self._save_transcript(transcript, summary)
+            self._archive_recording(audio_path)
 
             self._current_step = "Done"
             self._last_summary = summary
@@ -571,11 +701,43 @@ class LocalNotesApp(rumps.App):
         finally:
             self._processing_done = True
             self._cleanup_temps()
-            if audio_path:
+            if cleaned_path:
+                try:
+                    os.unlink(cleaned_path)
+                except Exception:
+                    pass
+            if audio_path and os.path.exists(audio_path):
                 try:
                     os.unlink(audio_path)
                 except Exception:
                     pass
+
+    def _archive_recording(self, audio_path: str) -> str | None:
+        """Move the WAV into recordings/ and prune to the newest KEEP_RECORDINGS."""
+        try:
+            RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            slug = _slugify_filename(self._use_case)
+            dest = RECORDINGS_DIR / f"{ts}_{slug}.wav"
+            shutil.move(audio_path, dest)
+        except Exception:
+            return None
+
+        try:
+            recordings = sorted(
+                RECORDINGS_DIR.glob("*.wav"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in recordings[KEEP_RECORDINGS:]:
+                try:
+                    old.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return str(dest)
 
     def _save_transcript(self, transcript: str, summary: str):
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)

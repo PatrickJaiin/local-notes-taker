@@ -69,6 +69,7 @@ def build_app():
         with open(plist_path, "rb") as f:
             plist = plistlib.load(f)
         plist["LSUIElement"] = True
+        plist["LSMultipleInstancesProhibited"] = True
         plist["NSMicrophoneUsageDescription"] = (
             "Local Notes needs microphone access to record audio for transcription."
         )
