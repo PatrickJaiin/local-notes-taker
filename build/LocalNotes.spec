@@ -48,6 +48,10 @@ for pkg in ("librosa", "lazy_loader", "numba", "llvmlite", "soxr", "audioread", 
 # avoids the slow plain-HTTP fallback on first model download.
 hiddenimports += ["hf_xet"]
 
+# auto_paste synthesizes Cmd+V via CGEvent; these pyobjc frameworks are
+# imported lazily inside the function so name them explicitly.
+hiddenimports += ["Quartz", "ApplicationServices"]
+
 hiddenimports += collect_submodules("mlx_lm")
 
 # Many libraries read their own package metadata at import time.

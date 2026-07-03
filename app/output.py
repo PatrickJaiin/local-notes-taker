@@ -26,24 +26,30 @@ def show_notification(title: str, message: str) -> None:
 
 
 def auto_paste() -> bool:
-    """Simulate Cmd+V to paste into the focused application. Returns False when
-    the keystroke was refused (typically a missing Automation/Accessibility
-    permission) so the caller can tell the user instead of claiming success."""
-    script = """
-    tell application "System Events"
-        keystroke "v" using command down
-    end tell
-    """
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        print(f"[paste] osascript failed: {result.stderr.decode(errors='replace').strip()}")
+    """Paste into the focused app by synthesizing Cmd+V as a native CGEvent.
+    Unlike the old osascript/System Events route, only THIS app needs the
+    Accessibility permission — no Automation consent, and no stray osascript/
+    Script Editor entries appear in the TCC lists. The system permission prompt
+    is raised automatically on first use. Returns False when the permission is
+    missing (or the event can't be posted) so the caller can tell the user."""
+    try:
+        import Quartz
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        if not AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
+            return False
+        V_KEY = 9  # kVK_ANSI_V
+        for key_down in (True, False):
+            event = Quartz.CGEventCreateKeyboardEvent(None, V_KEY, key_down)
+            Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        return True
+    except Exception as e:
+        print(f"[paste] CGEvent paste failed: {e}")
         return False
-    return True
 
 
 def _applescript_string(text: str) -> str:
