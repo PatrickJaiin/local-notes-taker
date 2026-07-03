@@ -1,6 +1,20 @@
 hotkey: <cmd>+<shift>+i
-whisper_model: large-v3-turbo  # tiny, base, small, medium, large-v3, large-v3-turbo
-ollama_model: qwen3:8b     # any model pulled in ollama
-ollama_mode: external      # "external" (system Ollama) or "bundled" (packaged binary)
-language:                   # auto-detect if empty, or set: en, hi, ml, fr, etc.
-auto_paste: true            # automatically paste summary into focused app after recording
+
+# Active transcriber: parakeet | whisper | granite
+asr_backend: parakeet
+
+# HuggingFace model ids per backend (weights download on demand the first time
+# you use them; everything runs locally on the GPU via MLX, except Granite which
+# uses PyTorch).
+parakeet_model: mlx-community/parakeet-tdt-0.6b-v3   # default; fast, multilingual (EU)
+whisper_model: mlx-community/whisper-large-v3-mlx     # ~99 languages; or *-large-v3-turbo
+granite_model: ibm-granite/granite-speech-3.3-8b      # heavy (~20 GB RAM); transcribes on stop
+granite_device: mps                                   # mps (Apple GPU) or cpu
+
+# Summary LLM (mlx-lm). qwen3-4b-instruct is non-thinking (no reasoning leakage).
+summary_model: mlx-community/Qwen3-4B-Instruct-2507-4bit
+
+language:            # auto-detect if empty (en, hi, ml, fr, es, de, ja, zh, …)
+use_case: Meeting
+auto_paste: true     # paste the summary into the focused app after recording
+chunk_seconds: 10    # live-transcription cadence for Whisper
