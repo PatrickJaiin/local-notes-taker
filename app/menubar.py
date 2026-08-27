@@ -7,6 +7,7 @@ import time
 import traceback
 from enum import Enum, auto
 
+import objc
 import rumps
 from AppKit import (
     NSApp,
@@ -14,6 +15,7 @@ from AppKit import (
     NSApplicationActivationPolicyRegular,
     NSWorkspace,
 )
+from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 from pynput import keyboard
 
 from app import __version__ as VERSION
@@ -27,6 +29,12 @@ from app.recorder import Recorder
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 USE_CASES = ["Meeting", "Lecture", "Brainstorm", "Interview", "Stand-up"]
+
+# Rolling live-transcript preview: PREVIEW_ROWS fixed rows of PREVIEW_COLS chars.
+# NSMenuItem titles render on a single line (a plain \n is not a line break), so a
+# multi-line preview has to be several menu items, not one with newlines in it.
+PREVIEW_ROWS = 3
+PREVIEW_COLS = 48
 
 # (label, backend key)
 TRANSCRIBERS = [
@@ -68,6 +76,59 @@ def _backend_label(backend: str) -> str:
     return backend
 
 
+def _wrap_tail(text: str, rows: int = PREVIEW_ROWS, cols: int = PREVIEW_COLS) -> list[str]:
+    """Word-wrap the tail of ``text`` into exactly ``rows`` lines of ``cols`` chars,
+    bottom-aligned and space-padded so the menu doesn't resize on every update."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if len(word) > cols:  # a single over-long token: hard-break it
+            if current:
+                lines.append(current)
+                current = ""
+            while len(word) > cols:
+                lines.append(word[:cols])
+                word = word[cols:]
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= cols:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+        lines = lines[-rows:]  # only the tail is ever displayed
+    if current:
+        lines.append(current)
+    lines = lines[-rows:]
+    while len(lines) < rows:
+        lines.insert(0, "")
+    return [line.ljust(cols) for line in lines]
+
+
+class _TickTarget(NSObject):
+    """Objective-C target for the UI timer.
+
+    rumps.Timer schedules its NSTimer in NSDefaultRunLoopMode only, so it stops
+    firing the moment a menu is opened (menu tracking runs the run loop in
+    NSEventTrackingRunLoopMode) — which froze the live transcript exactly when the
+    user opened the dropdown to read it. We schedule our own timer in
+    NSRunLoopCommonModes instead, which covers both.
+    """
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_TickTarget, self).init()
+        if self is None:
+            return None
+        self._callback = callback
+        return self
+
+    def onTick_(self, timer) -> None:
+        self._callback(timer)
+
+    onTick_ = objc.selector(onTick_, signature=b"v@:@")
+
+
 
 
 class LocalNotesApp(rumps.App):
@@ -92,13 +153,19 @@ class LocalNotesApp(rumps.App):
         # A queue (not a single slot) so concurrent writers can't clobber each
         # other and state-critical actions like _reset are never dropped.
         self._action_q: queue.Queue = queue.Queue()
-        self._transcript_so_far = ""
+        # Kept apart on purpose: the live preview is what the user watched being
+        # built for an hour, and a bad final pass must never be able to erase it.
+        self._live_transcript = ""
+        self._final_transcript = ""
+        self._stream_status = ""
         self._summary_preview = ""
         self._last_summary = ""
         self._prep_status = ""              # e.g. "Downloading model 42%"
         self._download_fraction: float | None = None
         self._download_label = ""
+        self._work_fraction: float | None = None   # transcription progress, 0..1
         self._recording_start: float | None = None
+        self._rendered_preview: list[str] = []
 
         self._flush_stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -106,9 +173,14 @@ class LocalNotesApp(rumps.App):
         self._build_menu()
         self._start_hotkey_listener()
 
-        # Single poll timer on the main thread for all UI updates.
-        self._poll_timer = rumps.Timer(self._tick, 0.15)
-        self._poll_timer.start()
+        # Single poll timer on the main thread for all UI updates. Scheduled in
+        # NSRunLoopCommonModes so it keeps firing while the dropdown is open —
+        # see _TickTarget.
+        self._tick_target = _TickTarget.alloc().initWithCallback_(self._tick)
+        self._poll_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.15, self._tick_target, "onTick:", None, True
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self._poll_timer, NSRunLoopCommonModes)
 
         # Pre-warm the active transcriber so the first recording is instant.
         threading.Thread(target=self._warm_backend, daemon=True).start()
@@ -121,6 +193,21 @@ class LocalNotesApp(rumps.App):
         self._transcript_preview = rumps.MenuItem("Transcript Preview", callback=self._copy_transcript)
         self._paste_last_btn = rumps.MenuItem("Paste Last Summary", callback=self._paste_last_summary)
         self._redo_last_btn = rumps.MenuItem("Redo Last Recording", callback=self._redo_last_recording)
+
+        # Rolling live transcript. Non-clickable display rows, hidden when idle;
+        # the clickable copy action stays on _transcript_preview above them.
+        self._stream_status_item = rumps.MenuItem("")
+        self._stream_status_item.set_callback(None)
+        self._stream_status_item.hidden = True
+        # rumps keys menu items by their title at insertion time, so the three rows
+        # need distinct starting titles or they collapse into one entry. Differing
+        # run lengths of blanks are unique as keys and identical on screen; the key
+        # is fixed at insertion, so later renders may all share the same text.
+        self._preview_items = []
+        for i in range(PREVIEW_ROWS):
+            item = rumps.MenuItem(" " * (PREVIEW_COLS - i), callback=None)
+            item.hidden = True
+            self._preview_items.append(item)
 
         self._status_item = rumps.MenuItem("Status: …")
         self._status_item.set_callback(None)
@@ -180,6 +267,8 @@ class LocalNotesApp(rumps.App):
             self._record_btn,
             self._cancel_btn,
             self._progress_item,
+            self._stream_status_item,
+            *self._preview_items,
             self._transcript_preview,
             self._paste_last_btn,
             self._redo_last_btn,
@@ -211,6 +300,17 @@ class LocalNotesApp(rumps.App):
         self._download_fraction = None
         self._download_label = ""
         self._prep_status = ""
+
+    def _work_cb(self, fraction: float | None, label: str) -> None:
+        """Progress for the work itself (chunked transcription, section summaries)
+        rather than for fetching weights. Called from background threads; stores
+        raw data only, _tick renders it."""
+        self._work_fraction = fraction
+        if label:
+            self._current_step = label
+
+    def _clear_work(self) -> None:
+        self._work_fraction = None
 
     def _notify_async(self, message: str) -> None:
         """Queue a notification to fire on the main thread (safe from any thread)."""
@@ -331,41 +431,92 @@ class LocalNotesApp(rumps.App):
         prep = self._render_prep()
         self.title = prep if prep else "📝"
         self._status_item.title = self._status_text()
+        self._update_copy_button()
+        self._hide_preview()
 
     def _render_recording(self) -> None:
         elapsed = time.time() - self._recording_start if self._recording_start else 0
         duration = storage.format_duration(elapsed)
-        word_count = len(self._transcript_so_far.split()) if self._transcript_so_far else 0
+        live = self._live_transcript
+        word_count = len(live.split()) if live else 0
 
+        # The download/load bar gets its own row now — it no longer evicts the
+        # live transcript, which is the one thing the user opened the menu to see.
         prep = self._render_prep()
-        if prep:
-            self.title = f"🔴 {duration} {prep}"
-            self._transcript_preview.title = self._prep_status
-            return
-
-        self.title = f"🔴 {duration} • {word_count}w" if word_count else f"🔴 {duration}"
+        self.title = f"🔴 {duration} {prep}" if prep else (
+            f"🔴 {duration} • {word_count}w" if word_count else f"🔴 {duration}"
+        )
 
         if not self._streaming_backend():
-            self._transcript_preview.title = "Transcribing on stop…"
-        elif self._transcript_so_far:
-            snippet = self._transcript_so_far.strip()[-40:]
-            if len(self._transcript_so_far.strip()) > 40:
-                snippet = "…" + snippet
-            self._transcript_preview.title = f"{word_count}w: {snippet}"
+            status = "Transcribing on stop…"
+        elif self._stream_status:
+            status = self._stream_status
+        elif live:
+            status = f"Live · {word_count}w"
+        elif prep:
+            status = self._prep_status or "Preparing…"
         else:
-            self._transcript_preview.title = "Listening…"
+            status = "Listening…"
+
+        self._stream_status_item.title = status
+        self._stream_status_item.hidden = False
+        self._update_copy_button()
+        self._render_preview(live)
+
+    def _render_preview(self, text: str) -> None:
+        """Paint the rolling transcript rows. Main thread only."""
+        show = bool(text)
+        lines = _wrap_tail(text) if show else []
+        if lines != self._rendered_preview:
+            # setTitle_ on every tick for three rows is wasteful and makes the menu
+            # flicker while it's open; only touch them when the text actually moved.
+            for item, line in zip(self._preview_items, lines):
+                item.title = line
+            self._rendered_preview = lines
+        for item in self._preview_items:
+            item.hidden = not show
+
+    def _hide_preview(self) -> None:
+        if not self._rendered_preview and self._stream_status_item.hidden:
+            return  # already hidden; _tick runs ~7x/s, don't churn the menu
+        self._stream_status_item.hidden = True
+        for item in self._preview_items:
+            item.hidden = True
+        self._rendered_preview = []
+
+    def _update_copy_button(self) -> None:
+        """Show the copy row only when pressing it would actually copy something —
+        a clickable item that silently does nothing reads as broken. Mirrors
+        _copy_transcript's precedence: streaming summary first, then transcript."""
+        if self.state == State.PROCESSING and self._summary_preview:
+            title = "Copy summary so far"
+        else:
+            transcript = self._final_transcript or self._live_transcript
+            if not transcript:
+                self._transcript_preview.hidden = True
+                return
+            title = f"Copy transcript ({len(transcript.split())}w)"
+        if self._transcript_preview.title != title:
+            self._transcript_preview.title = title
+        self._transcript_preview.hidden = False
 
     def _render_processing(self) -> None:
         prep = self._render_prep()
         if prep:
             self.title = prep
+        elif self._work_fraction is not None:
+            self.title = f"{self._current_step} {int(self._work_fraction * 100)}%"
         else:
             frame = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
             self.title = f"{frame} {self._current_step}"
         self._record_btn.title = f"{self._current_step}…"
-        if self._summary_preview:
-            snippet = self._summary_preview.strip()[-50:]
-            self._transcript_preview.title = "Summary: …" + snippet
+
+        self._stream_status_item.title = self._current_step
+        self._stream_status_item.hidden = False
+        # During summarization the rows follow the summary as it streams; before
+        # that they keep showing the transcript so the menu is never blank.
+        self._update_copy_button()
+        self._render_preview(self._summary_preview or self._final_transcript or self._live_transcript)
 
     def _streaming_backend(self) -> bool:
         return self.model_mgr.backend_supports_streaming(self._backend)
@@ -394,9 +545,12 @@ class LocalNotesApp(rumps.App):
         self.title = "🔴 0s"
         self._record_btn.title = "Stop Recording"
         self._cancel_btn.hidden = False
-        self._transcript_so_far = ""
+        self._live_transcript = ""
+        self._final_transcript = ""
+        self._stream_status = ""
         self._summary_preview = ""
         self._processing_cancelled = False
+        self._clear_work()
         # Fresh Event per session: a stale loop thread that outlived its join keeps
         # its own (permanently set) event, so it can never wake into a new session.
         self._flush_stop = threading.Event()
@@ -408,37 +562,66 @@ class LocalNotesApp(rumps.App):
 
     def _live_loop(self, stop_event: threading.Event) -> None:
         """Background: ensure the model is ready, then drive the live transcript for
-        streaming backends. Granite (non-streaming) just waits for stop."""
-        transcriber = self._ensure_backend_ready()
-        if transcriber is None or stop_event.is_set():
-            return
-        if not transcriber.supports_streaming:
+        streaming backends. Granite (non-streaming) never gets here.
+
+        This thread must never be able to affect the recording itself. Every failure
+        path below only stops the *preview* and reports why; the mic keeps running
+        and the full-quality pass on stop is unaffected."""
+        try:
+            self._run_live_loop(stop_event)
+        except Exception:
+            traceback.print_exc()
+            self._stream_status = "Live preview stopped — recording continues"
+
+    def _run_live_loop(self, stop_event: threading.Event) -> None:
+        # Checked from the class, before ensure_backend_ready: instantiating the
+        # backend is what pulls Granite's ~20 GB into memory, and it must not sit
+        # resident for the whole recording just to discover it can't stream.
+        if not self._streaming_backend():
             return  # Granite: no live preview; transcribed on stop.
 
+        transcriber = self._ensure_backend_ready()
+        if transcriber is None:
+            self._stream_status = "Live preview unavailable — full transcript on stop"
+            return
+        if stop_event.is_set():
+            return
+
         try:
-            transcriber.start_stream(self._language)
+            session = transcriber.start_stream(self._language)
         except Exception:
+            traceback.print_exc()
+            self._stream_status = "Live preview unavailable — full transcript on stop"
             return
 
         interval = getattr(transcriber, "live_interval", 1.0)
+        failures = 0
         try:
             while not stop_event.wait(interval):
                 pcm = self.recorder.drain_live()
                 if pcm is None or len(pcm) == 0:
                     continue
                 try:
-                    running = transcriber.feed(pcm)
-                    if running and not stop_event.is_set():
-                        self._transcript_so_far = running
+                    running = transcriber.feed(pcm, session)
+                    failures = 0
                 except Exception:
-                    pass
+                    traceback.print_exc()
+                    failures += 1
+                    if failures >= 3:
+                        # A wedged stream that silently returns nothing is worse
+                        # than an honest one that stops. Recording is untouched.
+                        self._stream_status = "Live preview stopped — recording continues"
+                        return
+                    continue
+                if running and not stop_event.is_set():
+                    self._live_transcript = running
             # Stop requested. No final drain: the recorder is already stopped (mic
             # off first), and the full-quality file pass covers the audio tail.
         finally:
             try:
-                transcriber.end_stream()
+                transcriber.end_stream(session)
             except Exception:
-                pass
+                traceback.print_exc()
 
     def _stop_recording(self) -> None:
         self.state = State.PROCESSING
@@ -466,8 +649,14 @@ class LocalNotesApp(rumps.App):
                 audio_path = str(dest)
                 archived = True
 
+            # Join without a timeout. The live loop is already unblocked (the mic
+            # is off and _flush_stop is set), so this returns after at most one
+            # in-flight feed. Proceeding early used to let the file pass run while
+            # a streaming session still owned the shared encoder — the model object
+            # itself carries the streaming attention modules, so the two passes
+            # corrupt each other.
             if self._loop_thread is not None:
-                self._loop_thread.join(timeout=30)
+                self._loop_thread.join()
             if self._processing_cancelled:
                 return
 
@@ -492,12 +681,16 @@ class LocalNotesApp(rumps.App):
         """Clean → transcribe → summarize → save → clipboard. Blocking; run from a
         worker thread. The caller owns ``audio_path``; this never deletes it."""
         cleaned_path = None
+        cancelled = lambda: self._processing_cancelled  # noqa: E731
         try:
-            self._current_step = "Cleaning audio"
-            try:
-                cleaned_path = clean_audio(audio_path)
-            except Exception:
-                cleaned_path = None
+            # Off by default — see clean_audio()'s docstring for why processed audio
+            # transcribes worse than raw.
+            if self.config.get("clean_audio", False):
+                self._current_step = "Cleaning audio"
+                try:
+                    cleaned_path = clean_audio(audio_path)
+                except Exception:
+                    cleaned_path = None
 
             if self._processing_cancelled:
                 return
@@ -506,21 +699,29 @@ class LocalNotesApp(rumps.App):
             transcriber = self._ensure_backend_ready()
             if transcriber is None:
                 return
-            # Full-quality pass on the cleaned audio. For streaming backends this
-            # re-runs audio the live preview already saw — intentionally: the file
-            # pass gets the cleaned signal, full context, and the post-drain tail.
-            transcript = transcriber.transcribe_file(
-                cleaned_path or audio_path, language=self._language
-            ).strip()
+            # Full-quality pass on the complete recording. For streaming backends
+            # this re-runs audio the live preview already saw — intentionally: the
+            # file pass decodes in overlapping chunks with a clean decoder state and
+            # full attention context, and it covers the post-drain tail.
+            try:
+                transcript = transcriber.transcribe_file(
+                    cleaned_path or audio_path,
+                    language=self._language,
+                    progress_cb=self._work_cb,
+                    cancel_check=cancelled,
+                ).strip()
+            finally:
+                self._clear_work()
+            if self._processing_cancelled:
+                return
+            # Never let a failed final pass throw away the transcript the user
+            # watched being built; fall back to it rather than to nothing.
             if not transcript:
-                transcript = self._transcript_so_far.strip()
+                transcript = self._live_transcript.strip()
             if not transcript:
                 show_notification("Local Notes", "No speech detected.")
                 return
-            self._transcript_so_far = transcript
-
-            if self._processing_cancelled:
-                return
+            self._final_transcript = transcript
 
             self._unload_granite()
 
@@ -533,13 +734,15 @@ class LocalNotesApp(rumps.App):
                     model_id=self._summary_model,
                     use_case=self._use_case,
                     on_token=lambda t: setattr(self, "_summary_preview", t),
-                    cancel_check=lambda: self._processing_cancelled,
-                    progress_cb=self._progress_cb,
+                    cancel_check=cancelled,
+                    progress_cb=self._work_cb,
                 )
             except Exception:
                 # Never lose the transcript because summarization failed.
                 self._save_transcript(transcript, "(summarization failed)", duration_s)
                 raise
+            finally:
+                self._clear_work()
             self._clear_prep()
 
             if self._processing_cancelled:
@@ -553,7 +756,9 @@ class LocalNotesApp(rumps.App):
 
             self._current_step = "Done"
             self._last_summary = summary
-            self._deliver_summary(summary)
+            # auto_paste() raises the Accessibility permission prompt and posts
+            # CGEvents; keep both on the main thread.
+            self._action_q.put(lambda: self._deliver_summary(summary))
         finally:
             # RAM handoff: free the heavy Granite model even on cancel/exception,
             # so it can't linger resident while idle.
@@ -612,8 +817,10 @@ class LocalNotesApp(rumps.App):
         self._processing_done = False
         self._processing_cancelled = False
         self._spinner_index = 0
-        self._transcript_so_far = ""
+        self._live_transcript = ""
+        self._final_transcript = ""
         self._summary_preview = ""
+        self._clear_work()
         self._record_btn.title = "Processing…"
         self._cancel_btn.hidden = False
         threading.Thread(target=self._reprocess, args=(str(recording),), daemon=True).start()
@@ -641,11 +848,16 @@ class LocalNotesApp(rumps.App):
             self._cancel_btn.hidden = True
 
     def _do_cancel_recording(self) -> None:
-        # Mic off and audio discarded immediately; only then wait for the live
-        # loop, so a slow model download can't keep the mic hot for 10 more seconds.
+        # Mic off and audio discarded immediately, so a slow model download can't
+        # keep the mic hot while we wait.
         self.recorder.cancel()
+        # Bounded, unlike the join in _process: a loop thread that outlives this is
+        # now harmless. It holds a stale session token, so its feed/end_stream are
+        # ignored, and drain_live refuses to hand it audio once recording stopped.
+        # Returning to IDLE promptly matters more than reaping the thread — on a
+        # first run this can be blocked behind a multi-minute weight download.
         if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=15)
         self._action_q.put(self._reset)
 
     # ----------------------------------------------------- menu callbacks
@@ -714,7 +926,10 @@ class LocalNotesApp(rumps.App):
             return
         self._summary_model = model_id
         self._persist({"summary_model": model_id})
-        summarizer.unload()  # drop the previously-loaded summary model
+        # Off the main thread: unload frees MLX memory on the shared MLX worker,
+        # which may be busy transcribing for minutes. Blocking here would freeze
+        # the menu bar. (_select_backend and _reload_config already do this.)
+        threading.Thread(target=summarizer.unload, daemon=True).start()
 
     def _select_use_case(self, sender) -> None:
         self._uncheck(self.menu["Use Case"])
@@ -762,8 +977,10 @@ class LocalNotesApp(rumps.App):
         if self.state == State.PROCESSING and self._summary_preview:
             copy_to_clipboard(self._summary_preview)
             show_notification("Local Notes", "Summary copied to clipboard!")
-        elif self._transcript_so_far:
-            copy_to_clipboard(self._transcript_so_far)
+            return
+        transcript = self._final_transcript or self._live_transcript
+        if transcript:
+            copy_to_clipboard(transcript)
             show_notification("Local Notes", "Transcript copied to clipboard!")
 
     def _paste_last_summary(self, sender) -> None:
@@ -814,6 +1031,10 @@ class LocalNotesApp(rumps.App):
     def _quit(self, sender) -> None:
         if self.recorder.is_recording:
             self.recorder.cancel()
+        self._flush_stop.set()
+        if self._poll_timer is not None:
+            self._poll_timer.invalidate()
+            self._poll_timer = None
         rumps.quit_application()
 
     # ------------------------------------------------------------- helpers
@@ -892,7 +1113,14 @@ class LocalNotesApp(rumps.App):
         self.title = "📝"
         self._record_btn.title = "Start Recording"
         self._cancel_btn.hidden = True
-        self._transcript_preview.title = "Transcript Preview"
         self._recording_start = None
         self._summary_preview = ""
+        self._stream_status = ""
+        # Cleared here too: every entry into PROCESSING must start from False, and
+        # relying on each entry point to remember is how a stuck state machine
+        # starts. _tick resets immediately if this is left set.
+        self._processing_done = False
+        self._processing_cancelled = False
         self._clear_prep()
+        self._clear_work()
+        self._hide_preview()

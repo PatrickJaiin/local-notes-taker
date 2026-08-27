@@ -10,15 +10,27 @@ pyyaml>=6.0
 # Model download / cache
 huggingface_hub>=0.30.0
 
-# ASR + summary on MLX (default Parakeet, Whisper option, summary LLM)
-parakeet-mlx>=0.3.0
-mlx-whisper>=0.4.0
-mlx-lm>=0.21.0
+# ASR + summary on MLX (default Parakeet, Whisper option, summary LLM).
+# parakeet-mlx is upper-bounded: the chunked final pass uses the chunk-merge and
+# mel helpers in parakeet_mlx.alignment / parakeet_mlx.audio, which are not part
+# of the package's public __all__ and have moved between minor releases.
+parakeet-mlx>=0.5.2,<0.6
+mlx-whisper>=0.4.3,<0.5
+mlx-lm>=0.31,<0.32
+# Imported by parakeet_mlx.audio for the mel filterbank. Declared explicitly so
+# the frozen build can't drop it, and because it is what pulls in joblib/loky
+# (see config.configure_hf_env for why that matters in a bundled app).
+librosa>=0.10.0
 
 # Granite Speech 3.3 8B backend (PyTorch); weights download on demand
 torch>=2.3.0
-torchaudio>=2.3.0
 transformers>=4.52.4
+# Not imported directly, but all three are load-bearing for Granite:
+# transformers loads its LoRA adapter through peft, its tokenizer needs
+# sentencepiece, and GraniteSpeechFeatureExtractor calls
+# requires_backends(self, ["torchaudio"]) to build its mel filterbank.
+torchaudio>=2.3.0
 peft>=0.15.0
-soundfile>=0.12.1
 sentencepiece>=0.2.0
+# soundfile is intentionally not listed: librosa (via parakeet-mlx) requires it,
+# so it is always installed, and nothing here imports it directly.

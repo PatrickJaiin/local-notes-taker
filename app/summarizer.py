@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Callable
 
+from app.mlx_runtime import on_mlx_thread
 from app.transcribers.base import ProgressCb
 
 # Per-use-case system prompts. The user's chosen use case decides the output
@@ -48,22 +50,61 @@ CancelCheck = Callable[[], bool]
 _MAX_TOKENS = 4096
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+# Above this, summarize in sections and then summarize the section summaries. An
+# hour-long lecture is ~9,000 words; handing that to a 4B model in one shot fits
+# the context window but flattens the detail, and can run past _MAX_TOKENS.
+_MAP_REDUCE_WORD_THRESHOLD = 4500
+_SECTION_WORDS = 2500
+
+_SECTION_PROMPT = (
+    "You are summarizing ONE SECTION of a longer {use_case} transcript.\n"
+    "Capture every substantive point in this section as detailed bullet points.\n"
+    "Do not write an introduction or conclusion — this will be merged with other sections."
+)
+_REDUCE_PREFIX = (
+    "The following are section-by-section notes from a single {use_case}, in order. "
+    "Merge them into one coherent set of notes, removing duplication and keeping "
+    "the detail.\n\n"
+)
+
 # model_id -> (model, tokenizer)
 _cache: dict[str, tuple] = {}
+_load_lock = threading.Lock()
 
 
+@on_mlx_thread
 def _get_model(model_id: str, progress_cb: ProgressCb | None = None):
-    if model_id in _cache:
-        return _cache[model_id]
-    if progress_cb:
-        progress_cb(None, "Loading summary model")
-    from mlx_lm import load
+    # Loaded on the shared MLX worker thread — mlx-lm weights are pinned to the
+    # thread that created them, and any other thread loses them (see
+    # app.mlx_runtime). The generation in _generate runs on that same thread.
+    cached = _cache.get(model_id)
+    if cached is not None:
+        return cached
+    # Serialize loads: two threads racing here would each pull a multi-GB model
+    # into memory before either populated the cache.
+    with _load_lock:
+        cached = _cache.get(model_id)
+        if cached is not None:
+            return cached
+        if progress_cb:
+            progress_cb(None, "Loading summary model")
+        from mlx_lm import load
 
-    pair = load(model_id)
-    _cache[model_id] = pair
+        pair = load(model_id)
+        _cache[model_id] = pair
     if progress_cb:
         progress_cb(None, "")  # clear "Loading…" so the title shows "Summarizing"
     return pair
+
+
+def _split_sections(transcript: str, section_words: int = _SECTION_WORDS) -> list[str]:
+    """Split a transcript into roughly equal word-count sections."""
+    words = transcript.split()
+    if len(words) <= section_words:
+        return [transcript]
+    count = max(2, -(-len(words) // section_words))  # ceil
+    per = -(-len(words) // count)
+    return [" ".join(words[i:i + per]) for i in range(0, len(words), per)]
 
 
 def summarize(
@@ -76,10 +117,11 @@ def summarize(
     progress_cb: ProgressCb | None = None,
 ) -> str:
     """Generate a use-case-formatted summary locally via mlx-lm, streaming tokens
-    to ``on_token`` for a live preview. Returns the final summary text."""
-    from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_sampler
+    to ``on_token`` for a live preview. Returns the final summary text.
 
+    Long transcripts are summarized section by section and then merged, so an
+    hour-long recording keeps its detail instead of being flattened into a
+    handful of bullets."""
     prompt_text = SYSTEM_PROMPTS.get(use_case, _DEFAULT_PROMPT.format(use_case=use_case))
 
     try:
@@ -87,9 +129,66 @@ def summarize(
     except Exception as e:
         raise RuntimeError(f"Could not load summary model '{model_id}': {e}") from e
 
+    if len(transcript.split()) <= _MAP_REDUCE_WORD_THRESHOLD:
+        return _generate(
+            model, tokenizer, prompt_text, transcript,
+            on_token=on_token, cancel_check=cancel_check,
+        )
+
+    sections = _split_sections(transcript)
+    section_prompt = _SECTION_PROMPT.format(use_case=use_case)
+    notes: list[str] = []
+    for i, section in enumerate(sections, start=1):
+        if cancel_check is not None and cancel_check():
+            break
+        if progress_cb is not None:
+            progress_cb(i / (len(sections) + 1), f"Summarizing {i}/{len(sections)}")
+        # Prefix the live preview with the sections already done so the dropdown
+        # keeps growing instead of restarting on every section.
+        done = "\n\n".join(notes)
+        notes.append(
+            _generate(
+                model, tokenizer, section_prompt, section,
+                on_token=(lambda t, d=done: on_token(f"{d}\n\n{t}" if d else t))
+                if on_token is not None
+                else None,
+                cancel_check=cancel_check,
+            )
+        )
+
+    merged = "\n\n".join(n for n in notes if n)
+    if not merged or (cancel_check is not None and cancel_check()):
+        return merged
+    if progress_cb is not None:
+        progress_cb(None, "Merging notes")
+    return _generate(
+        model, tokenizer, prompt_text,
+        _REDUCE_PREFIX.format(use_case=use_case) + merged,
+        on_token=on_token, cancel_check=cancel_check,
+    )
+
+
+@on_mlx_thread
+def _generate(
+    model,
+    tokenizer,
+    system_prompt: str,
+    user_content: str,
+    *,
+    on_token: OnToken | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> str:
+    """One streamed mlx-lm completion, returned with any <think> block stripped.
+
+    Runs on the shared MLX worker thread, so ``on_token`` and ``cancel_check`` are
+    invoked from there. Both are plain attribute reads/writes in the menu bar;
+    neither may block on the MLX executor or touch MLX itself."""
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_sampler
+
     messages = [
-        {"role": "system", "content": prompt_text},
-        {"role": "user", "content": transcript},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
     ]
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
     sampler = make_sampler(temp=0.3, top_p=0.95)

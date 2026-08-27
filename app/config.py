@@ -29,6 +29,10 @@ DEFAULT_CONFIG: dict = {
     "use_case": "Meeting",
     "auto_paste": True,
     "chunk_seconds": 10,  # live-transcription cadence for the Whisper pseudo-stream
+    # Pre-process audio before transcribing (high-pass + gentle levelling). Off by
+    # default: ASR models want the raw signal, and the cleanup mostly amplifies
+    # room noise during pauses. Turn on only for recordings too quiet to decode.
+    "clean_audio": False,
 }
 
 # --- Filesystem layout ---
@@ -185,6 +189,9 @@ def _normalize(config: dict) -> dict:
     except (TypeError, ValueError):
         config["chunk_seconds"] = DEFAULT_CONFIG["chunk_seconds"]
     config["auto_paste"] = bool(config.get("auto_paste", True))
+    # Absent from every config.yaml written before this key existed, so read it
+    # through the default rather than assuming it is present.
+    config["clean_audio"] = bool(config.get("clean_audio", DEFAULT_CONFIG["clean_audio"]))
     return config
 
 

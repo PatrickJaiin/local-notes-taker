@@ -6,6 +6,7 @@ import sys
 import threading
 
 from app import config as cfg
+from app.mlx_runtime import run_on_mlx_thread
 from app.transcribers.base import ProgressCb, Transcriber
 
 # Granite 3.3 8B (~18-22 GB resident) is impractical below this; we warn but proceed.
@@ -177,6 +178,13 @@ class ModelManager:
 
 
 def free_memory() -> None:
+    """Drop cached allocations. Runs on the shared MLX worker thread: both
+    mx.clear_cache() and the array deallocations that gc.collect() triggers are
+    MLX work, and MLX state is thread-scoped (see app.mlx_runtime)."""
+    run_on_mlx_thread(_free_memory)
+
+
+def _free_memory() -> None:
     gc.collect()
     try:
         import mlx.core as mx
