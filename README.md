@@ -1,105 +1,99 @@
-# Local Notes Taker
+# Local Notes
 
-A macOS menu bar app that records audio, transcribes it with Whisper, and generates structured notes using Ollama, all running locally on your machine. No cloud services, no API keys, complete privacy.
+A macOS **menu-bar app** that records audio, shows a **live transcript** as you
+speak, and — when you stop — uses a **local LLM** to write notes formatted for
+your use case. Everything runs **locally on Apple Silicon**. No cloud, no API keys.
+
+Transcription ships with **NVIDIA Parakeet TDT** by default and lets you switch to
+**Whisper Large V3** or **IBM Granite Speech 3.3 8B** — those download their
+weights the first time you pick them. Summaries are generated with a local
+**`mlx-lm`** model (Qwen3 4B by default).
+
+## Requirements
+
+- **Apple Silicon Mac** (M-series), macOS 14+
+- For running from source: **Python 3.11 or 3.12**
+
+> Apple Silicon only — the models run on Apple's MLX/Metal (and PyTorch/MPS for
+> Granite). Intel Macs and Windows are not supported.
 
 ## Download
 
-Grab the latest standalone `.dmg` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases). The app bundles Ollama and automatically downloads the Qwen3 model on first launch — no manual installation needed.
-
-> A Windows build (`.zip`) is also available on the Releases page, built from the [`windows`](https://github.com/PatrickJaiin/local-notes-taker/tree/windows) branch.
+Grab the latest `.dmg` from the [Releases page](https://github.com/PatrickJaiin/local-notes-taker/releases).
+On first use of a transcriber the app downloads that model's weights into
+`~/Library/Application Support/Local Notes/huggingface` (Parakeet ≈ 2.5 GB,
+Whisper ≈ 1.6–3 GB, Granite 8B ≈ 17 GB). The menu bar shows download progress.
 
 ## Features
 
-- **Menu bar app** — lives in your macOS menu bar, always one click (or hotkey) away
-- **Global hotkey** — start/stop recording from any app with a keyboard shortcut
-- **Local transcription** — uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (runs on CPU, no GPU required)
-- **Local summarization** — generates notes via [Ollama](https://ollama.com) with any model you choose
-- **Use case presets** — Meeting, Lecture, Brainstorm, Interview, Stand-up, or custom
-- **Auto-paste** — summary is copied to clipboard and pasted into your active app
-- **Transcript history** — full transcripts and summaries saved to `transcripts/`
-- **Open transcripts quickly** — menu action opens the transcripts folder directly
+- **Menu-bar app** — always one click (or hotkey) away
+- **Global hotkey** — start/stop recording from any app (default **⌘⇧I**)
+- **Live transcript** — Parakeet/Whisper stream a running transcript while you record
+- **Switchable transcribers** — Parakeet TDT (default) · Whisper Large V3 · Granite Speech 8B
+- **Local summaries** — `mlx-lm`; pick the summary model and the use-case format
+- **Use-case presets** — Meeting, Lecture, Brainstorm, Interview, Stand-up, or a custom one you define
+- **Auto-paste** — the summary is copied and pasted into your active app
+- **History** — full transcripts + summaries saved under `transcripts/`
 
-## Install from Source
-
-### Prerequisites
-
-- **macOS** (uses native menu bar and AppleScript)
-- **Python 3.9+**
-- **[Ollama](https://ollama.com)** installed and running
-
-### Installation
+## Install from source
 
 ```bash
 git clone https://github.com/PatrickJaiin/local-notes-taker.git
 cd local-notes-taker
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e .
-ollama pull qwen3:8b
-```
-
-> You can swap `qwen3:8b` for any Ollama model — just update `config.yaml`.
-
-## Usage
-
-Start the app:
-
-```bash
 local-notes
 ```
 
-A **pencil icon** (📝) appears in your menu bar.
+A **📝** icon appears in your menu bar.
 
 | Action | How |
 |---|---|
-| Start recording | Click the menu bar icon → "Start Recording", or press the global hotkey |
-| Stop recording | Click "Stop Recording" or press the hotkey again |
-| Change use case | Menu bar icon → "Use Case" → pick a preset or enter a custom one |
+| Start / stop recording | Menu-bar icon → Start/Stop Recording, or the global hotkey |
+| Switch transcriber | Menu → **Transcriber** → Parakeet / Whisper / Granite |
+| Choose summary model | Menu → **Summary Model** |
+| Change format | Menu → **Use Case** → preset or **Custom…** |
+| Set language | Menu → **Language** |
 
-Once you stop recording, the app will:
+When you stop, the app cleans the audio, runs the final transcription pass,
+summarizes it locally, copies the summary to your clipboard, and pastes it into
+the focused app. The menu-bar icon shows a spinner with the current step.
 
-1. Transcribe the audio with Whisper
-2. Summarize the transcript with Ollama
-3. Copy the summary to your clipboard
-4. Auto-paste it into the focused app
+## Transcribers
 
-The menu bar icon shows a spinner with progress during processing.
+| Backend | Model (default) | Notes |
+|---|---|---|
+| **Parakeet** (default) | `mlx-community/parakeet-tdt-0.6b-v3` | Fast, true streaming live transcript, 25 European languages |
+| **Whisper** | `mlx-community/whisper-large-v3-mlx` | ~99 languages (use this for e.g. Hindi/Malayalam); pseudo-streaming |
+| **Granite** | `ibm-granite/granite-speech-3.3-8b` | Heavy (~20 GB RAM); transcribes when you stop (no live preview) |
 
-### Global Hotkey
-
-Default: **Cmd + Shift + I**
-
-Change it in `config.yaml`:
-
-```yaml
-hotkey: <cmd>+<shift>+i
-```
+> Granite 8B is large. The app warns on machines with limited RAM, loads it only
+> for transcription, and frees it before summarizing so the two models don't
+> co-reside in memory.
 
 ## Configuration
 
-All settings live in `config.yaml`:
+All settings live in `config.yaml` (in the repo when running from source, or in
+`~/Library/Application Support/Local Notes/` when installed). The menu writes to
+it automatically; **Reload Config** re-reads it.
 
 ```yaml
+asr_backend: parakeet                                # parakeet | whisper | granite
+parakeet_model: mlx-community/parakeet-tdt-0.6b-v3
+whisper_model: mlx-community/whisper-large-v3-mlx
+granite_model: ibm-granite/granite-speech-3.3-8b
+granite_device: mps                                  # mps | cpu
+summary_model: mlx-community/Qwen3-4B-Instruct-2507-4bit
+language:                                            # blank = auto-detect
+use_case: Meeting
+auto_paste: true
+chunk_seconds: 10                                    # Whisper live cadence
 hotkey: <cmd>+<shift>+i
-whisper_model: large-v3-turbo   # tiny, base, small, medium, large-v3, large-v3-turbo
-ollama_model: qwen3:8b          # any model pulled in Ollama
 ```
 
-| Option | Description |
-|---|---|
-| `hotkey` | Global keyboard shortcut to toggle recording |
-| `whisper_model` | Whisper model size — smaller is faster, larger is more accurate |
-| `ollama_model` | Ollama model used for summarization |
-| `ollama_mode` | `external` (default, uses system Ollama) or `bundled` (uses packaged binary) |
-| `language` | Whisper language code (`en`, `hi`, `fr`, etc.) — empty for auto-detect |
+## Building a .dmg
 
-## Transcripts
-
-Every recording saves a timestamped file in the `transcripts/` directory:
-
-```
-transcripts/2025-06-15_14-30-00_meeting.txt
-```
-
-Each file contains the use case, date, full transcript, and generated summary.
+See [`build/README.md`](build/README.md).
 
 ## License
 

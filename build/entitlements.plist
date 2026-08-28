@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- CPython / cffi / ctypes need writable+executable memory -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Load the many bundled third-party dylibs + MLX Metal libs.
+         Without this, the hardened-runtime app refuses to launch. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- MLX may JIT-compile Metal kernels -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- Microphone capture -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

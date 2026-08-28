@@ -1,35 +1,36 @@
+from __future__ import annotations
+
 import tempfile
 
 import numpy as np
 from scipy import signal
 from scipy.io import wavfile
 
+from app.transcribers.base import wav_to_float_mono
+
 
 def clean_audio(input_path: str) -> str:
-    """Apply high-pass filter + dynamic gain + soft limit to a WAV file.
+    """Apply a high-pass filter + gentle dynamic gain to a WAV file.
 
-    Removes low-frequency rumble/hum, boosts quieter speakers toward a target
-    level without amplifying silence, and soft-clips peaks. Returns the path
-    to a new temp WAV; caller is responsible for unlinking.
+    Removes low-frequency rumble/hum and boosts quieter speakers toward a target
+    level without amplifying silence. Returns the path to a new temp WAV; caller
+    is responsible for unlinking.
+
+    This is OFF by default (``clean_audio`` in config.yaml). ASR models are trained
+    on unprocessed speech, and the previous version of this function was actively
+    harmful to transcription: it soft-clipped every sample through tanh (~16%
+    peak compression, i.e. broadband harmonic distortion) and could swing the gain
+    8x within a quarter second, which in a distant-mic lecture mostly amplifies
+    room noise during pauses. The tanh is gone and the gain is far gentler; even
+    so, prefer the raw audio unless a recording is genuinely too quiet to decode.
     """
     rate, data = wavfile.read(input_path)
-
-    if data.dtype == np.int16:
-        audio = data.astype(np.float32) / 32768.0
-    elif data.dtype == np.int32:
-        audio = data.astype(np.float32) / 2147483648.0
-    else:
-        audio = data.astype(np.float32)
-
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
+    audio = wav_to_float_mono(data)
 
     sos = signal.butter(4, 80, btype="highpass", fs=rate, output="sos")
     audio = signal.sosfilt(sos, audio).astype(np.float32)
 
     audio = _dynamic_gain(audio, rate)
-
-    audio = np.tanh(audio * 1.1)
 
     audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
 
@@ -45,11 +46,15 @@ def _dynamic_gain(audio: np.ndarray, rate: int) -> np.ndarray:
     Approximates ffmpeg's dynaudnorm: quiet windows get boosted toward
     target_peak, loud windows stay put, and windows below noise_floor
     aren't amplified so silence doesn't turn into hiss.
+
+    The window is 2 s (was 0.5 s) and the cap is 3x (was 8x): a gain curve that
+    moves quickly and far is itself an amplitude modulation the acoustic model
+    has never heard, which costs more accuracy than the level gain buys.
     """
-    window = int(rate * 0.5)
+    window = int(rate * 2.0)
     hop = max(window // 2, 1)
     target_peak = 0.7
-    max_gain = 8.0
+    max_gain = 3.0
     noise_floor = 0.02
 
     if len(audio) < window:

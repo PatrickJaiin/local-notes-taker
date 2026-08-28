@@ -1,12 +1,19 @@
 __pycache__/
 *.pyc
 .DS_Store
-transcripts/
-*.wav
+.venv/
+venv/
 .env
+
+# User data / runtime
+transcripts/
+recordings/
+huggingface/
+*.wav
+
+# Build output
 dist/
+*.dmg
 *.egg-info/
-assets/
-build/py2app_build/
 build/pyinstaller_build/
-setup_macos.py
+build/py2app_build/
