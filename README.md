@@ -65,7 +65,7 @@ the focused app. The menu-bar icon shows a spinner with the current step.
 |---|---|---|
 | **Parakeet** (default) | `mlx-community/parakeet-tdt-0.6b-v3` | Fast, true streaming live transcript, 25 European languages |
 | **Whisper** | `mlx-community/whisper-large-v3-mlx` | ~99 languages (use this for e.g. Hindi/Malayalam); pseudo-streaming |
-| **Granite** | `ibm-granite/granite-speech-3.3-8b` | Heavy (~20 GB RAM); transcribes when you stop (no live preview) |
+| **Granite** | `ibm-granite/granite-speech-3.3-8b` | Heavy (~34 GB RAM, fp32); transcribes when you stop (no live preview) |
 
 > Granite 8B is large. The app warns on machines with limited RAM, loads it only
 > for transcription, and frees it before summarizing so the two models don't

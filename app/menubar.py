@@ -331,7 +331,7 @@ class LocalNotesApp(rumps.App):
 
     def _warm_backend(self) -> None:
         """Blocking (background-thread only): get the active backend ready for a fast
-        first recording. Granite only gets its weights fetched — the ~20 GB model is
+        first recording. Granite only gets its weights fetched — the ~34 GB model is
         loaded just-in-time while processing so it never sits resident at idle."""
         if self._backend != cfg.GRANITE:
             self._ensure_backend_ready()
@@ -575,7 +575,7 @@ class LocalNotesApp(rumps.App):
 
     def _run_live_loop(self, stop_event: threading.Event) -> None:
         # Checked from the class, before ensure_backend_ready: instantiating the
-        # backend is what pulls Granite's ~20 GB into memory, and it must not sit
+        # backend is what pulls Granite's ~34 GB into memory, and it must not sit
         # resident for the whole recording just to discover it can't stream.
         if not self._streaming_backend():
             return  # Granite: no live preview; transcribed on stop.

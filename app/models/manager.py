@@ -9,7 +9,7 @@ from app import config as cfg
 from app.mlx_runtime import run_on_mlx_thread
 from app.transcribers.base import ProgressCb, Transcriber
 
-# Granite 3.3 8B (~18-22 GB resident) is impractical below this; we warn but proceed.
+# Granite 3.3 8B (~34 GB resident in fp32) is impractical below this; we warn but proceed.
 GRANITE_8B_MIN_RAM_GB = 48
 
 
@@ -171,7 +171,7 @@ class ModelManager:
         ram = self.total_ram_gb()
         if ram is not None and ram < GRANITE_8B_MIN_RAM_GB:
             return (
-                f"Granite Speech 8B needs ~20 GB+ RAM; this Mac has {ram:.0f} GB. "
+                f"Granite Speech 8B needs ~34 GB+ RAM; this Mac has {ram:.0f} GB. "
                 "Transcription will be slow and may swap heavily."
             )
         return None

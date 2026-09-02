@@ -44,12 +44,76 @@ _SYSTEM_PROMPT = (
 _USER_PROMPT = "<|audio|>can you transcribe the speech into a written format?"
 
 
+_projector_patched = False
+
+
+def _patch_projector_broadcast() -> None:
+    """Make GraniteSpeechEncoderProjector broadcast its query over audio blocks.
+
+    The projector reshapes the encoder output to ``(blocks, window, dim)`` but hands
+    the Q-Former a query of shape ``(1, num_queries, dim)``. Up to transformers
+    5.12 the Q-Former's hand-rolled matmul attention broadcast batch 1 against
+    ``blocks``; from 5.13 it goes through ``ALL_ATTENTION_FUNCTIONS`` (SDPA), which
+    returns a batch-1 result, and the following ``view(batch, blocks*queries, -1)``
+    raises. Expanding the query to the block batch first is correct under both
+    code paths (verified byte-for-byte identical transcripts on 5.12.1 and 5.16.1).
+    """
+    global _projector_patched
+    if _projector_patched:
+        return
+    _projector_patched = True
+    try:
+        import math
+
+        import torch.nn.functional as F
+        from transformers.models.granite_speech import modeling_granite_speech as mg
+
+        projector_cls = mg.GraniteSpeechEncoderProjector
+    except Exception:
+        return  # different transformers layout; leave upstream code alone
+
+    def forward(self, hidden_states):
+        batch_size, seq_len, dim = hidden_states.size()
+        nblocks = math.ceil(seq_len / self.window_size)
+        pad = nblocks * self.window_size - seq_len
+        hidden_states = F.pad(hidden_states, (0, 0, 0, pad), "constant", 0)
+        hidden_states = hidden_states.view(batch_size * nblocks, self.window_size, dim)
+        query = self.query.expand(hidden_states.shape[0], -1, -1)
+        query_output = self.qformer(
+            query_embeds=query,
+            encoder_hidden_states=hidden_states,
+            encoder_attention_mask=None,
+            return_dict=True,
+        )
+        return self.linear(
+            query_output.last_hidden_state.view(
+                batch_size, nblocks * self.window_size // self.downsample_rate, -1
+            )
+        )
+
+    projector_cls.forward = forward
+
+
 class GraniteTranscriber(Transcriber):
     """IBM Granite Speech 3.3 8B via HuggingFace transformers + peft (PyTorch).
 
-    This is the heavy backend: ~18-22 GB resident. It does not stream — the menu
-    bar shows "Transcribing on stop…" and runs ``transcribe_file`` once. The app
-    unloads it (``unload``) before loading the summary LLM so they never co-reside.
+    This is the heavy backend: ~34 GB resident in fp32. It does not stream — the
+    menu bar shows "Transcribing on stop…" and runs ``transcribe_file`` once. The
+    app unloads it (``unload``) before loading the summary LLM so they never
+    co-reside.
+
+    Two platform quirks are handled here (both reproduced on 2026-09-02):
+
+    * **fp32 on MPS.** In fp16 the conformer encoder degenerates on Apple GPUs and
+      the LLM decodes runs of "1", "s", "0" or "…" instead of speech; bf16 decodes
+      to nothing at all. fp32 transcribes correctly, so that is what MPS gets even
+      though it doubles the footprint. CPU was always fp32.
+    * **Projector query broadcast.** transformers >= 5.13 routes the Q-Former
+      through the shared attention backend, which no longer broadcasts the
+      projector's single query batch across the N audio blocks — the projector
+      then fails with ``shape '[1, 300, -1]' is invalid for input of size 3072``.
+      ``_patch_projector_broadcast`` expands the query to the block batch up
+      front, which is a no-op for the older matmul path.
     """
 
     supports_streaming = False
@@ -76,12 +140,15 @@ class GraniteTranscriber(Transcriber):
         # Fall back to CPU if MPS isn't available.
         if self.device == "mps" and not torch.backends.mps.is_available():
             self.device = "cpu"
-        dtype = torch.float16 if self.device == "mps" else torch.float32
+        # fp32 everywhere — see the class docstring for why not fp16/bf16 on MPS.
+        dtype = torch.float32
+
+        _patch_projector_broadcast()
 
         self._processor = AutoProcessor.from_pretrained(self.model_id)
         self._tokenizer = self._processor.tokenizer
         self._model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            self.model_id, torch_dtype=dtype
+            self.model_id, dtype=dtype
         )
         self._model.to(self.device)
         self._model.eval()
@@ -131,7 +198,7 @@ class GraniteTranscriber(Transcriber):
             chat, tokenize=False, add_generation_prompt=True
         )
         inputs = self._processor(text, wav, return_tensors="pt").to(self.device)
-        # Match audio features to the model's dtype (avoids fp16/fp32 mismatch on MPS).
+        # Match audio features to the model's dtype (the processor emits fp32).
         if "input_features" in inputs and hasattr(self._model, "dtype"):
             inputs["input_features"] = inputs["input_features"].to(self._model.dtype)
 

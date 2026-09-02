@@ -1,6 +1,6 @@
 [project]
 name = "local-notes"
-version = "0.2.0"
+version = "0.2.1"
 description = "macOS menu-bar app that records, transcribes (Parakeet / Whisper / Granite via MLX), and summarizes audio locally on Apple Silicon"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
     # Imported by parakeet_mlx.audio for the mel filterbank.
     "librosa>=0.10.0",
     "torch>=2.3.0",
-    "transformers>=4.52.4",
+    "transformers>=4.56.0",  # `dtype=` kwarg in from_pretrained
     # Not imported directly, but all three are load-bearing for Granite:
     # transformers loads its LoRA adapter through peft, its tokenizer needs
     # sentencepiece, and GraniteSpeechFeatureExtractor calls

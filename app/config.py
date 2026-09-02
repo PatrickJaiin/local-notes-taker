@@ -22,7 +22,7 @@ DEFAULT_CONFIG: dict = {
     "parakeet_model": "mlx-community/parakeet-tdt-0.6b-v3",
     "whisper_model": "mlx-community/whisper-large-v3-mlx",
     "granite_model": "ibm-granite/granite-speech-3.3-8b",
-    "granite_device": "mps",  # "mps" (fast, Apple GPU) or "cpu" (slow, most compatible)
+    "granite_device": "mps",  # "mps" (Apple GPU, fp32) or "cpu" (slow, most compatible)
     # Summary LLM (mlx-lm):
     "summary_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
     "language": None,  # Whisper/Parakeet language code; auto-detect if empty

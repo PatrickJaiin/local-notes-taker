@@ -125,8 +125,8 @@ app = BUNDLE(
         "LSUIElement": True,  # menu-bar only, no Dock icon
         "LSMultipleInstancesProhibited": True,
         "NSMicrophoneUsageDescription": "Local Notes needs microphone access to record audio for transcription.",
-        "CFBundleShortVersionString": "0.2.0",
-        "CFBundleVersion": "0.2.0",
+        "CFBundleShortVersionString": "0.2.1",
+        "CFBundleVersion": "0.2.1",
         "LSMinimumSystemVersion": "14.0",
     },
 )
